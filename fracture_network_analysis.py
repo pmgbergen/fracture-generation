@@ -6,28 +6,39 @@ only.
 """
 import numpy as np
 import networkx as nx
+import time
 
 import porepy as pp
 from examples.papers.flow_upscaling import segment_pixelation
 
 
-def permeability_upscaling(network, data, mesh_args, directions, do_viz=True):
+def permeability_upscaling(
+    network, data, mesh_args, directions, do_viz=True, tracer_transport=False
+):
 
-    gb = network.mesh(network.tol, mesh_args)
     directions = np.asarray(directions)
     upscaled_perm = np.zeros(directions.size)
 
+    sim_info = {}
+
     for di, direct in enumerate(directions):
-        gb = _setup_simulation(gb, data, direct)
 
-        key = "flow"
-        discretization_key = key + "_" + pp.DISCRETIZATION
+        tic = time.time()
+        gb = network.mesh(network.tol, mesh_args)
+        toc = time.time()
+        if di == 0:
+            sim_info['num_cells_2d'] = gb.grids_of_dimension(2)[0].num_cells
+            sim_info['time_for_meshing'] = toc - tic
 
-        mpfa = pp.Tpfa(key)
+        gb = _setup_simulation_flow(gb, data, direct)
+
+        pressure_kw = "flow"
+
+        mpfa = pp.Tpfa(pressure_kw)
         for g, d in gb:
             d[pp.PRIMARY_VARIABLES] = {"pressure": {"cells": 1}}
-            d[pp.DISCRETIZATION] = {"pressure": {"diffusive": pp.Tpfa("flow")}}
-        coupler = pp.RobinCoupling("flow", pp.Tpfa("flow"))
+            d[pp.DISCRETIZATION] = {"pressure": {"diffusive": mpfa}}
+        coupler = pp.RobinCoupling("flow", mpfa)
         for e, d in gb.edges():
             g1, g2 = gb.nodes_of_edge(e)
             d[pp.PRIMARY_VARIABLES] = {"pressure": {"cells": 1}}
@@ -39,17 +50,26 @@ def permeability_upscaling(network, data, mesh_args, directions, do_viz=True):
                 }
             }
 
-            d[discretization_key] = pp.RobinCoupling(key, mpfa)
-
         assembler = pp.Assembler()
 
         # Discretize
+        tic = time.time()
         A, b, block_dof, full_dof = assembler.assemble_matrix_rhs(gb)
+        if di == 0:
+            toc = time.time()
+            sim_info['Time_for_assembly'] = toc - tic
+        tic = time.time()
         p = np.linalg.solve(A.A, b)
+        if di == 0:
+            toc = time.time()
+            sim_info['Time_for_pressure_solve'] = toc - tic
+
         assembler.distribute_variable(gb, p, block_dof, full_dof)
 
+        # Post processing to recover flux
+        tot_pressure = 0
+        tot_area = 0
         tot_inlet_flux = 0
-
         for g, d in gb:
             inlet = d.get("inlet_faces", None)
             if inlet is None or inlet.size == 0:
@@ -60,21 +80,56 @@ def permeability_upscaling(network, data, mesh_args, directions, do_viz=True):
                 * d["parameters"][key]["bc_values"]
             )
             tot_inlet_flux += flux[inlet].sum()
+
+            pressure_cell = d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_pressure_cell"] * d["pressure"]
+            pressure_flux = (
+                d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_pressure_face"]
+                * d["parameters"][pressure_kw]["bc_values"]
+            )
+            inlet_pressure = pressure_cell[inlet] + pressure_flux[inlet]
+            aperture = d[pp.PARAMETERS][pressure_kw]['aperture'][0]
+            tot_pressure += np.sum(inlet_pressure * g.face_areas[inlet] * aperture)
+            tot_area += g.face_areas[inlet].sum() * aperture
             if g.dim == gb.dim_max():
+                # Extension of the domain in the active direction
                 dx = g.nodes[direct].max() - g.nodes[direct].min()
-                area = (
-                    g.nodes[: g.dim].max(axis=1) - g.nodes[: g.dim].min(axis=1)
-                ).prod() / dx
-        upscaled_perm[di] = tot_inlet_flux * dx / area
+                cross_sectional_area = (g.nodes[:g.dim].max(axis=1) - g.nodes[:g.dim].min(axis=1)).prod() / dx
+                import pdb
+                #pdb.set_trace()
+        mean_pressure = tot_pressure / tot_area
+        upscaled_perm[di] = tot_inlet_flux * dx / (mean_pressure * cross_sectional_area)
+        # End of post processing for permeability upscaling
 
-        if do_viz:
-            exp = pp.Exporter(gb, "direction_" + str(direct))
-            exp.write_vtk("pressure")
+        if tracer_transport:
+            tracer_variable = "temperature"
 
-    return upscaled_perm
+            temperature_kw = "transport"
+
+            # Identifier of the two terms of the equation
+            adv = "advection"
+
+            adv_discr = pp.Upwind(temperature_kw)
+
+            adv_coupling = pp.UpwindCoupling(temperature_kw)
+            for g, d in gb:
+                d[pp.PRIMARY_VARIABLES] = {tracer_variable: {"cells": 1}}
+                d[pp.DISCRETIZATION] = {tracer_variable: {adv: adv_discr}}
+
+            for e, d in gb.edges():
+                g1, g2 = gb.nodes_of_edge(e)
+                d[pp.PRIMARY_VARIABLES] = {"lambda_adv": {"cells": 1}, "lambda_diff": {"cells": 1}}
+                d[pp.COUPLING_DISCRETIZATION] = {
+                    adv: {g1: (tracer_variable, adv), g2: (tracer_variable, adv), e: ("lambda_adv", adv_coupling)}
+                }
 
 
-def _setup_simulation(gb, data, direction):
+        import pdb
+        #pdb.set_trace()
+
+    return upscaled_perm, sim_info
+
+
+def _setup_simulation_flow(gb, data, direction):
 
     min_coord = gb.bounding_box()[0][direction]
     max_coord = gb.bounding_box()[1][direction]
@@ -101,11 +156,74 @@ def _setup_simulation(gb, data, direction):
             )[0]
             bound_type = np.array(["neu"] * bound_faces.size)
             bound_type[hit_out] = "dir"
-            bound_type[hit_in] = "dir"
+
+            bound_type[hit_in] = "neu"
             bound = pp.BoundaryCondition(g, bound_faces.ravel("F"), bound_type)
             bc_val = np.zeros(g.num_faces)
             bc_val[bound_faces] = 0
-            bc_val[bound_faces[hit_in]] = 1
+            influx = g.face_areas[bound_faces[hit_in]] * a[0]
+            bc_val[bound_faces[hit_in]] = -influx
+            specified_parameters.update({"bc": bound, "bc_values": bc_val})
+
+            d["inlet_faces"] = bound_faces[hit_in]
+
+        pp.initialize_data(d, g, "flow", specified_parameters)
+
+    for e, d in gb.edges():
+        gl, _ = gb.nodes_of_edge(e)
+        dl = gb.node_props(gl)
+        mg = d["mortar_grid"]
+        aperture = dl[pp.PARAMETERS]["flow"]["aperture"][0]
+        kn = data["fracture_perm"] / aperture
+        d[pp.PARAMETERS] = pp.Parameters(mg, ["flow"], [{"normal_diffusivity": kn}])
+        d[pp.DISCRETIZATION_MATRICES] = {"flow": {}}
+
+    return gb
+
+def _compute_flow_rate(self):
+    # this function is only for the first benchmark case
+    for g, d in self.gb:
+        if g.dim < 3:
+            continue
+        faces, cells, sign = sps.find(g.cell_faces)
+        index = np.argsort(cells)
+        faces, sign = faces[index], sign[index]
+
+        discharge = d["discharge"].copy()
+        discharge[faces] *= sign
+        discharge[g.get_internal_faces()] = 0
+        discharge[discharge < 0] = 0
+        val = np.dot(discharge, np.abs(g.cell_faces) * self.p[: g.num_cells])
+        self.outflow = np.r_[self.outflow, val]
+
+def _setup_simulation_tracer(gb, data, direction):
+    min_coord = gb.bounding_box()[0][direction]
+    max_coord = gb.bounding_box()[1][direction]
+
+    for g, d in gb:
+        param = d[pp.PARAMETERS]
+        transport_parameter_dictionary = {}
+        param.update_dictionaries("transport", transport_parameter_dictionary)
+        param.set_from_other("transport", "flow", ["aperture"])
+        d[pp.DISCRETIZATION_MATRICES]["transport"] = {}
+
+
+        bound_faces = g.tags["domain_boundary_faces"].nonzero()[0]
+        if bound_faces.size > 0:
+            hit_out = np.where(
+                np.abs(g.face_centers[direction, bound_faces] - max_coord) < 1e-8
+            )[0]
+            hit_in = np.where(
+                np.abs(g.face_centers[direction, bound_faces] - min_coord) < 1e-8
+            )[0]
+            bound_type = np.array(["neu"] * bound_faces.size)
+            bound_type[hit_out] = "dir"
+            bound_type[hit_in] = "neu"
+            bound = pp.BoundaryCondition(g, bound_faces.ravel("F"), bound_type)
+            bc_val = np.zeros(g.num_faces)
+            bc_val[bound_faces] = 0
+            influx = g.face_areas[bound_faces[hit_in]]
+            bc_val[bound_faces[hit_in]] = influx
 
             specified_parameters.update({"bc": bound, "bc_values": bc_val})
 

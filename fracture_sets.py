@@ -1073,7 +1073,6 @@ class ChildFractureSet(FractureSet):
         elif self.points_along_fracture == "uniform":
             dist = (0.5 + np.arange(num_children)) / (num_children + 1)
             p = start + dist * dx
-            print(p)
         elif self.points_along_fracture == "distribution":
             nrm_dx = np.sqrt(np.sum(dx ** 2))
             length = 0
