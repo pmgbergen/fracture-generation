@@ -211,6 +211,80 @@ def cartesian_partition(domain, num_x, num_y=None):
         return x0, dx
 
 
+def compute_topology(networks):
+    """ Compute the node and branch topology of a list of fracture network.
+
+    The node topology is defined by counting the number of I-nodes (end nodes),
+    T-nodes (where one fractures terminates in another) and X-nodes (standard
+    intersection).
+
+    The branch topology counts the number of fracture branches that are isolated
+    (both endpoints are I-nodes), branches where one end is an I-node, one is
+    connected (T or X), and branches where both endpoints are T or X. These types
+    are denoted II, IC and CC, respectively.
+
+    Parameters:
+        networks (list of FractureSets): Each list element is a fracture network.
+
+    Returns:
+        dictionary with keys 'i', 'y' and 'x'. The values are lists with length
+            len(networks), counting the number of i, y and x-nodes for each network.
+        dictionary with keys 'ii', 'ic' and 'cc'. The values are lists with length
+            len(networks), counting the number of ii, ic and cc branches for each network.
+
+    """
+
+    # Storage arrays
+    num_i, num_y, num_x = [], [], []
+    num_i_i, num_i_c, num_c_c = [], [] ,[]
+
+    # Loop over all networks, first compute node topology, then branches
+    for n in networks:
+        node_types = analyze_intersections_of_sets(n, tol=n.tol)
+        i = node_types['i_nodes']
+        y = node_types['y_nodes']
+        x = node_types['x_nodes']
+
+        # Count nodes on the domain boundary - these will be subtracted from
+        # the i-nodes
+        p = n.pts
+        d = n.domain
+        tol = n.tol
+        num_bound = np.logical_and.reduce((np.abs(p[0] - d['xmin']) < tol,
+                                           np.abs(p[0] - d['xmax']) < tol,
+                                           np.abs(p[1] - d['ymin']) < tol,
+                                           np.abs(p[1] - d['ymax']) < tol)).sum()
+        # Store information
+        num_i.append((i.sum() - num_bound).astype(np.int))
+        num_y.append(y.sum().astype(np.int))
+        num_x.append(x.sum().astype(np.int))
+
+        # Branch topology
+        # Find the number of T-intersections that ends in each fracture.
+        # This is different from the field y_nodes, which considers endpoints
+        # of the fracture itself.
+        a = node_types['arrests']
+        # Isolated branches have two i-nodes, no other nodes
+        ii = np.logical_and.reduce((i == 2, y == 0, x == 0, a == 0)).sum().astype(np.int)
+        # ic branches either have one i-node and one y-node (the end point of
+        # the fracture must be etiher i or y - x and a cannot be the end),
+        # Or two i-nodes together with at least one cross. In the latter case
+        # there will be two ic-branches
+        ic = np.logical_and.reduce((i == 1, y == 1, x == 0, a == 0)).sum().astype(np.int) \
+            + 2 * np.logical_and(i == 2, x + a > 0 ).sum().astype(np.int)
+        # CC-branches are formed between y, x and a-nodes. Their number on
+        # each fracture will be the number of such nodes minus one.
+        cc = np.maximum(y + x + a - 1, 0).sum()
+
+        num_i_i.append(ii)
+        num_i_c.append(ic)
+        num_c_c.append(cc)
+
+    node_topology = {'i': num_i, 'y': num_y, 'x': num_x}
+    branch_topology = {'ii': num_i_i, 'ic': num_i_c, 'cc': num_c_c}
+    return node_topology, branch_topology
+
+
 def analyze_intersections_of_sets(set_1, set_2=None, tol=1e-4):
     """ Count the number of node types (I, X, Y) per fracture in one or two
     fracture sets.
