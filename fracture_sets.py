@@ -1302,6 +1302,96 @@ class ChildFractureSet(FractureSet):
 
         return p_found, e_found
 
+    def _identify_parent_pairs(self, parents, angle):
+        """ Identify pairs of fractures that lie in direct sight of each other
+        along a specified angle.
+
+        The pairs are found by tracing rays from the end points of fractures,
+        and look for intersections with other fractures. In the example below,
+        all three (horizontal) left fractures find each other, while the
+        right fractures hits nothing.
+            ___________________
+               /  /     /     /
+              /  /_____/     /
+             /  /     /     /      __________
+            /__/_____/_____/___
+
+        Parameters:
+            parents (FractureSet): Fracture set for which we look for pairs.
+            angle (double, radians): Angle of search direction
+
+        Returns:
+            np.array, 2 X num_pairs: Indices of the edges forming unique pairs.
+                Sorted along each column. The columns are ordered so that
+            arr[0] is non-decreasing.
+
+        """
+        # Data structure for storage
+        parent_pairs = []
+        # We are interested in any intersection in the direction of the specified angle.
+        # Create a vector with the right direction, and length equal to the maximum
+        # size of the domain.
+        _, _, dx, dy = self._decompose_domain()
+        length = np.maximum(dx, dy)
+        vec = np.vstack((np.cos(angle), np.sin(angle))) * length
+
+        # Start and endpoints of the parents.
+        start_parent, end_parent = parents.get_points()
+
+        # Loop over all fractures, look for pairs that involves this fracture.
+        # We may find the same pair twice, once for each member of the pair.
+        # Uniqueness is enforced below
+        for fi in range(parents.edges.shape[1]):
+            # Start and end_points of this fracture
+            start, end = parents.get_points(fi)
+
+            # The start point of the segments are twice the start, twice the end
+            # of this fracture.
+            offshots_start = np.hstack((start, start, end, end))
+
+            # From the nodes of this fracture, shoot segments along the vector on
+            # both sides of the fracture.
+            start_pos = start + vec
+            start_neg = start - vec
+            end_pos = end + vec
+            end_neg = end - vec
+            # End points of the shooting segments
+            offshots_end = np.hstack((start_pos, start_neg, end_pos, end_neg))
+            # Loop over all off-shots, see if they hit other fractures in the set.
+            for oi in range(offshots_start.shape[1]):
+                # Start and endpoint of the offshot
+                s = offshots_start[:, oi].reshape((-1, 1))
+                e = offshots_end[:, oi].reshape((-1, 1))
+                # Compute distance between this point and all other segments in the network
+                d, cp, cg_seg = pp.cg.dist_segment_segment_set(s, e, start_parent, end_parent)
+                # Count hits, where the distance is very small
+                hit = np.where(d < self.tol)[0]
+                if hit.size == 0:
+                    # There should be at least one hit, namely the start and end point
+                    # of fi
+                    raise ValueError('Error when finding pairs of fractures')
+                elif hit.size == 1:
+                    # The offshot did not hit anything. We can move on
+                    continue
+                else:
+                    # The offshot has hit at least one fracture.
+                    # Compute distance from all closest points to the start
+                    dist_start = np.sqrt(np.sum((s - cp[:, hit])**2, axis=0))
+                    # Find the first point along the line, away from the start
+                    first_constraint = np.argsort(dist_start)[1]
+                    parent_pairs.append((fi, first_constraint))
+
+        pair_array = np.array([p.T for p in parent_pairs])
+
+        # Uniquify and sort the output array
+        pair_array.sort(axis=0)
+        pair_array = pp.utils.setmembership.unique_columns_tol(pair_array)
+
+        sort_ind = np.argsort(pair_array[0])
+        pair_array = pair_array[:, sort_ind]
+
+        return pair_array
+
     def _fit_dist_from_parent_distribution(self, ks_size=100, p_val_min=0.05):
         """ For isolated fractures, fit a distribution for the distance from
         the child center to the parent fracture, orthogonal to the parent line.
