@@ -24,6 +24,10 @@ class StochasticFractureGenerator(object):
     of their center points.
 
     """
+    def __init__(self, dist_length=None, dist_orientation=None, dist_spacing=None):
+        self.dist_length = dist_length
+        self.dist_orientation = dist_orientation
+        self.intensity = dist_spacing
 
     def fit_distributions(self, **kwargs):
         """ Fit statistical distributions to describe the fracture set.
@@ -390,7 +394,7 @@ class StochasticFractureGenerator(object):
 
         p, e = self._fracture_from_center_angle_length(p_center, angles, lengths)
 
-        return FractureSet(p, e, domain)
+        return pp.FractureNetwork2d(p, e, domain)
 
 <<<<<<< b6bc8bfc3ed6302b3d7c164e844213e853b91617
     # --------- Methods for manipulation of the fracture set geometry
@@ -717,8 +721,236 @@ class StochasticFractureGenerator(object):
 =======
 >>>>>>> Reworked FractureSets class into a generator for fracture networks
 
+class FractureChildrenGenerator():
 
-class ChildFractureSet(FractureSet):
+    def compute_density_along_line(self, p, start, end, **kwargs):
+
+        p_x, loc_edge, domain_loc, _ = self._project_points_to_line(p, start, end)
+
+        # Count the point density along this fracture.
+        return frac_gen.count_center_point_densities(
+            p_x, loc_edge, domain_loc, **kwargs
+        )
+
+    def _project_points_to_line(self, p, start, end):
+        if p.ndim == 1:
+            p = p.reshape((-1, 1))
+        if start.ndim == 1:
+            start = start.reshape((-1, 1))
+        if end.ndim == 1:
+            end = end.reshape((-1, 1))
+
+        def _to_3d(pt):
+            return np.vstack((pt, np.zeros(pt.shape[1])))
+
+        p -= start
+        end -= start
+        theta = np.arctan2(end[1], end[0])
+
+        assert np.abs(end[0] * np.sin(theta) + end[1] * np.cos(theta)) < 1e-5
+
+        start_x = 0
+        p_x = p[0] * np.cos(theta) - p[1] * np.sin(theta)
+        end_x = end[0] * np.cos(theta) - end[1] * np.sin(theta)
+
+        if end_x < start_x:
+            domain_loc = {"xmin": end_x, "xmax": start_x}
+        else:
+            domain_loc = {"xmin": start_x, "xmax": end_x}
+
+        # The density calculation computes the center of each fracture,
+        # based on an assumption that the fracture consist of two points.
+        # Make a line out of the points, with identical start and end points
+        loc_edge = np.tile(np.arange(p_x.size), (2, 1))
+        return p_x, loc_edge, domain_loc, theta
+
+    def generate(self):
+        raise ValueError('Not implemented. Use a subclass')
+
+    def _draw_num_children(self, parent_realiz, pi):
+        """ Draw the number of children for a fracture based on the statistical
+        distribution.
+
+        Parameters:
+            parent_realiz (FractureSet): Fracture set for
+            pi (int):
+
+            These parameters are currently not in use. In the future, the number
+            of children should scale with the length of the parent fracture.
+        """
+        nc = frac_gen.generate_from_distribution(1, self.dist_num_children)
+        return np.round(nc * parent_realiz.length()[pi]).astype(np.int)[0]
+
+
+class IsolatedFractureChildernGenerator(FractureChildrenGenerator):
+
+
+    def _generate_isolated_fractures(self, children_points, start_parent, end_parent):
+
+        if children_points.size == 0:
+            return np.empty((2, 0)), np.empty((2, 0))
+
+        dx = end_parent - start_parent
+        theta = np.arctan2(dx[1], dx[0])
+
+        if children_points.ndim == 1:
+            children_points = children_points.reshape((-1, 1))
+
+        num_children = children_points.shape[1]
+
+        dist_from_parent = frac_gen.generate_from_distribution(
+            num_children, self.dist_from_parents
+        )
+
+        # Assign equal probability that the points are on each side of the parent
+        side = frac_gen.generate_from_distribution(num_children, self.dist_side)
+
+        # Vector from the parent line to the new center points
+        vec = np.vstack((-np.sin(theta), np.cos(theta))) * dist_from_parent
+
+        children_center = children_points + side * vec
+
+        child_angle = frac_gen.generate_from_distribution(num_children, self.dist_angle)
+        child_length = frac_gen.generate_from_distribution(
+            num_children, self.dist_length
+        )
+
+        p_start = children_center + 0.5 * child_length * np.vstack(
+            (np.cos(child_angle), np.sin(child_angle))
+        )
+        p_end = children_center - 0.5 * child_length * np.vstack(
+            (np.cos(child_angle), np.sin(child_angle))
+        )
+
+        p = np.hstack((p_start, p_end))
+        edges = np.vstack(
+            (np.arange(num_children), num_children + np.arange(num_children))
+        )
+
+        return p, edges
+
+    def _fit_dist_from_parent_distribution(self, ks_size=100, p_val_min=0.05):
+        """ For isolated fractures, fit a distribution for the distance from
+        the child center to the parent fracture, orthogonal to the parent line.
+
+        The function also evaluates the fitness of the chosen distribution by a
+        Kolgomorov-Smirnov test.
+
+        The function should be called after the field self.isolated_stats['center_distance']
+        has been assigned, e.g. by calling self.compute_statistics()
+
+        IMPLEMENTATION NOTE: The selection of appropriate distributions is a bit
+        unclear. For the moment, we chose between uniform, lognormal and
+        exponential distributions. More generally, this function can be made
+        much more advanced, see for instance Xu and Dowd (Computers and
+        Geosciences, 2010).
+
+        Parameters:
+            ks_size (int, optional): The number of realizations used in the
+                Kolmogorov-Smirnov test. Defaults to 100.
+            p_val_min (double, optional): P-value used in Kolmogorev-Smirnov test
+                for acceptance of the chosen distribution. Defaults to 0.05.
+
+        Returns:
+            dictionary, with fields 'dist': The distribution with best fit.
+                                    'param': Fitted parameters for the best
+                                        ditribution.
+                                    'p_val': P-value for the best distribution
+                                        and parameters.
+
+            If the fracture set contains no isolated fractures, and empty
+            dictionary is returned.
+
+        Raises:
+            ValueError if none of the candidate distributions give a satisfactory
+                fit.
+
+        """
+        data = self.isolated_stats["center_distance"]
+
+        # Special case of no isolated fractures.
+        if data.size == 0:
+            return {}
+
+        # Set of candidate distributions. This is somewhat arbitrary, better
+        # options may exist
+        candidate_dist = np.array([stats.uniform, stats.lognorm, stats.expon])
+        # Fit each distribution
+        dist_fit = np.array([d.fit(data, floc=0) for d in candidate_dist])
+
+        # Inline function for Kolgomorov-Smirnov test
+        ks = lambda d, p: stats.ks_2samp(data, d.rvs(*p, size=ks_size))[1]
+        # Find the p-value for each of the candidate disributions, and their
+        # fitted parameters
+        p_val = np.array([ks(d, p) for d, p in zip(candidate_dist, dist_fit)])
+        best_fit = np.argmax(p_val)
+
+        if p_val[best_fit] < p_val_min:
+            raise ValueError("p-value not satisfactory for length fit")
+
+        self.dist_from_parents = {
+            "dist": candidate_dist[best_fit],
+            "param": dist_fit[best_fit],
+            "pval": p_val[best_fit],
+        }
+
+    def _compute_line_density_isolated_nodes(self, isolated):
+        # To ultimately describe the isolated fractures as a marked point
+        # process, with stochastic location in terms of its distribution along
+        # the fracture and perpendicular to it, we describe the distance from
+        # the child center to its parent line.
+
+        # There may be some issues with accumulation close to the end points
+        # of the parent fracture; in particular if the orientation of the
+        # child is far from perpendicular (meaning that a lot of it is outside
+        # the 'span' of the parent), or if multiple parents are located nearby,
+        # and we end up taking the distance to one that is not the natural
+        # parent, whatever that means.
+        # This all seems to confirm that ideall, a unique parent should be
+        # identified for all children.
+
+        # Start and end points of the parent fractures
+        start_parent, end_parent = self.parent.get_points()
+
+        center_of_isolated = 0.5 * (
+            self.pts[:, self.edges[0, isolated]] + self.pts[:, self.edges[1, isolated]]
+        )
+        dist_isolated, closest_pt_isolated = pp.cg.dist_points_segments(
+            center_of_isolated, start_parent, end_parent
+        )
+
+        # Minimum distance from center to a fracture
+        num_isolated = isolated.size
+        closest_parent_isolated = np.argmin(dist_isolated, axis=1)
+
+        def dist_pt(a, b):
+            return np.sqrt(np.sum((a - b) ** 2, axis=0))
+
+        num_isolated = isolated.size
+
+        # Distance from center of isolated node to the fracture (*not* its
+        # prolongation). This will have some statistical distribution
+        points_on_line = closest_pt_isolated[
+            np.arange(num_isolated), closest_parent_isolated
+        ].T
+        pert_dist_isolated = dist_pt(center_of_isolated, points_on_line)
+
+        num_occ_all = np.zeros(self.parent.edges.shape[1])
+
+        # Loop over all parent fractures that are closest to some children.
+        # Project the children onto the parent, compute a density map along
+        # the parent.
+        for counter, fi in enumerate(np.unique(closest_parent_isolated)):
+            hit = np.where(closest_parent_isolated == fi)[0]
+            p_loc = points_on_line[:, hit]
+            num_occ_all[fi] = self.compute_density_along_line(
+                p_loc, start_parent[:, fi], end_parent[:, fi], nx=1
+            )
+
+        return num_occ_all, pert_dist_isolated
+
+
+class ChildFractureSet(FractureChildrenGenerator):
     """ Fracture set that is defined based on its distance from a member of
     a parent family
     """
@@ -897,19 +1129,6 @@ class ChildFractureSet(FractureSet):
 
         return new_child
 
-    def _draw_num_children(self, parent_realiz, pi):
-        """ Draw the number of children for a fracture based on the statistical
-        distribution.
-
-        Parameters:
-            parent_realiz (FractureSet): Fracture set for
-            pi (int):
-
-            These parameters are currently not in use. In the future, the number
-            of children should scale with the length of the parent fracture.
-        """
-        nc = frac_gen.generate_from_distribution(1, self.dist_num_children)
-        return np.round(nc * parent_realiz.length()[pi]).astype(np.int)[0]
 
     def _draw_children_along_parent(self, parent_realiz, pi, num_children):
         """ Define location of children along the lines of a parent fracture.
@@ -1008,49 +1227,6 @@ class ChildFractureSet(FractureSet):
         else:
             return is_isolated, np.logical_or(is_one_y, is_both_y)
 
-    def _generate_isolated_fractures(self, children_points, start_parent, end_parent):
-
-        if children_points.size == 0:
-            return np.empty((2, 0)), np.empty((2, 0))
-
-        dx = end_parent - start_parent
-        theta = np.arctan2(dx[1], dx[0])
-
-        if children_points.ndim == 1:
-            children_points = children_points.reshape((-1, 1))
-
-        num_children = children_points.shape[1]
-
-        dist_from_parent = frac_gen.generate_from_distribution(
-            num_children, self.dist_from_parents
-        )
-
-        # Assign equal probability that the points are on each side of the parent
-        side = frac_gen.generate_from_distribution(num_children, self.dist_side)
-
-        # Vector from the parent line to the new center points
-        vec = np.vstack((-np.sin(theta), np.cos(theta))) * dist_from_parent
-
-        children_center = children_points + side * vec
-
-        child_angle = frac_gen.generate_from_distribution(num_children, self.dist_angle)
-        child_length = frac_gen.generate_from_distribution(
-            num_children, self.dist_length
-        )
-
-        p_start = children_center + 0.5 * child_length * np.vstack(
-            (np.cos(child_angle), np.sin(child_angle))
-        )
-        p_end = children_center - 0.5 * child_length * np.vstack(
-            (np.cos(child_angle), np.sin(child_angle))
-        )
-
-        p = np.hstack((p_start, p_end))
-        edges = np.vstack(
-            (np.arange(num_children), num_children + np.arange(num_children))
-        )
-
-        return p, edges
 
     def _generate_y_fractures(self, start, length_distribution=None):
         """ Generate fractures that originates in a parent fracture.
@@ -1262,71 +1438,6 @@ class ChildFractureSet(FractureSet):
 
         return pair_array
 
-    def _fit_dist_from_parent_distribution(self, ks_size=100, p_val_min=0.05):
-        """ For isolated fractures, fit a distribution for the distance from
-        the child center to the parent fracture, orthogonal to the parent line.
-
-        The function also evaluates the fitness of the chosen distribution by a
-        Kolgomorov-Smirnov test.
-
-        The function should be called after the field self.isolated_stats['center_distance']
-        has been assigned, e.g. by calling self.compute_statistics()
-
-        IMPLEMENTATION NOTE: The selection of appropriate distributions is a bit
-        unclear. For the moment, we chose between uniform, lognormal and
-        exponential distributions. More generally, this function can be made
-        much more advanced, see for instance Xu and Dowd (Computers and
-        Geosciences, 2010).
-
-        Parameters:
-            ks_size (int, optional): The number of realizations used in the
-                Kolmogorov-Smirnov test. Defaults to 100.
-            p_val_min (double, optional): P-value used in Kolmogorev-Smirnov test
-                for acceptance of the chosen distribution. Defaults to 0.05.
-
-        Returns:
-            dictionary, with fields 'dist': The distribution with best fit.
-                                    'param': Fitted parameters for the best
-                                        ditribution.
-                                    'p_val': P-value for the best distribution
-                                        and parameters.
-
-            If the fracture set contains no isolated fractures, and empty
-            dictionary is returned.
-
-        Raises:
-            ValueError if none of the candidate distributions give a satisfactory
-                fit.
-
-        """
-        data = self.isolated_stats["center_distance"]
-
-        # Special case of no isolated fractures.
-        if data.size == 0:
-            return {}
-
-        # Set of candidate distributions. This is somewhat arbitrary, better
-        # options may exist
-        candidate_dist = np.array([stats.uniform, stats.lognorm, stats.expon])
-        # Fit each distribution
-        dist_fit = np.array([d.fit(data, floc=0) for d in candidate_dist])
-
-        # Inline function for Kolgomorov-Smirnov test
-        ks = lambda d, p: stats.ks_2samp(data, d.rvs(*p, size=ks_size))[1]
-        # Find the p-value for each of the candidate disributions, and their
-        # fitted parameters
-        p_val = np.array([ks(d, p) for d, p in zip(candidate_dist, dist_fit)])
-        best_fit = np.argmax(p_val)
-
-        if p_val[best_fit] < p_val_min:
-            raise ValueError("p-value not satisfactory for length fit")
-
-        self.dist_from_parents = {
-            "dist": candidate_dist[best_fit],
-            "param": dist_fit[best_fit],
-            "pval": p_val[best_fit],
-        }
-
     def _fit_num_children_distribution(self):
         """ Construct a Poisson distribution for the number of children per
         parent.
@@ -1530,101 +1641,7 @@ class ChildFractureSet(FractureSet):
 
         return num_occ_all
 
-    def _compute_line_density_isolated_nodes(self, isolated):
-        # To ultimately describe the isolated fractures as a marked point
-        # process, with stochastic location in terms of its distribution along
-        # the fracture and perpendicular to it, we describe the distance from
-        # the child center to its parent line.
 
-        # There may be some issues with accumulation close to the end points
-        # of the parent fracture; in particular if the orientation of the
-        # child is far from perpendicular (meaning that a lot of it is outside
-        # the 'span' of the parent), or if multiple parents are located nearby,
-        # and we end up taking the distance to one that is not the natural
-        # parent, whatever that means.
-        # This all seems to confirm that ideall, a unique parent should be
-        # identified for all children.
-
-        # Start and end points of the parent fractures
-        start_parent, end_parent = self.parent.get_points()
-
-        center_of_isolated = 0.5 * (
-            self.pts[:, self.edges[0, isolated]] + self.pts[:, self.edges[1, isolated]]
-        )
-        dist_isolated, closest_pt_isolated = pp.cg.dist_points_segments(
-            center_of_isolated, start_parent, end_parent
-        )
-
-        # Minimum distance from center to a fracture
-        num_isolated = isolated.size
-        closest_parent_isolated = np.argmin(dist_isolated, axis=1)
-
-        def dist_pt(a, b):
-            return np.sqrt(np.sum((a - b) ** 2, axis=0))
-
-        num_isolated = isolated.size
-
-        # Distance from center of isolated node to the fracture (*not* its
-        # prolongation). This will have some statistical distribution
-        points_on_line = closest_pt_isolated[
-            np.arange(num_isolated), closest_parent_isolated
-        ].T
-        pert_dist_isolated = dist_pt(center_of_isolated, points_on_line)
-
-        num_occ_all = np.zeros(self.parent.edges.shape[1])
-
-        # Loop over all parent fractures that are closest to some children.
-        # Project the children onto the parent, compute a density map along
-        # the parent.
-        for counter, fi in enumerate(np.unique(closest_parent_isolated)):
-            hit = np.where(closest_parent_isolated == fi)[0]
-            p_loc = points_on_line[:, hit]
-            num_occ_all[fi] = self.compute_density_along_line(
-                p_loc, start_parent[:, fi], end_parent[:, fi], nx=1
-            )
-
-        return num_occ_all, pert_dist_isolated
-
-    def _project_points_to_line(self, p, start, end):
-        if p.ndim == 1:
-            p = p.reshape((-1, 1))
-        if start.ndim == 1:
-            start = start.reshape((-1, 1))
-        if end.ndim == 1:
-            end = end.reshape((-1, 1))
-
-        def _to_3d(pt):
-            return np.vstack((pt, np.zeros(pt.shape[1])))
-
-        p -= start
-        end -= start
-        theta = np.arctan2(end[1], end[0])
-
-        assert np.abs(end[0] * np.sin(theta) + end[1] * np.cos(theta)) < 1e-5
-
-        start_x = 0
-        p_x = p[0] * np.cos(theta) - p[1] * np.sin(theta)
-        end_x = end[0] * np.cos(theta) - end[1] * np.sin(theta)
-
-        if end_x < start_x:
-            domain_loc = {"xmin": end_x, "xmax": start_x}
-        else:
-            domain_loc = {"xmin": start_x, "xmax": end_x}
-
-        # The density calculation computes the center of each fracture,
-        # based on an assumption that the fracture consist of two points.
-        # Make a line out of the points, with identical start and end points
-        loc_edge = np.tile(np.arange(p_x.size), (2, 1))
-        return p_x, loc_edge, domain_loc, theta
-
-    def compute_density_along_line(self, p, start, end, **kwargs):
-
-        p_x, loc_edge, domain_loc, _ = self._project_points_to_line(p, start, end)
-
-        # Count the point density along this fracture.
-        return frac_gen.count_center_point_densities(
-            p_x, loc_edge, domain_loc, **kwargs
-        )
 
     def snap(self, threshold):
         """ Modify point definition so that short branches are removed, and
