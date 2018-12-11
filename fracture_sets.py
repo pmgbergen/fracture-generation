@@ -9,7 +9,6 @@ import numpy as np
 import scipy
 import scipy.stats as stats
 import logging
-import networkx as nx
 
 from examples.papers.flow_upscaling import frac_gen, fracture_network_analysis
 import porepy as pp
@@ -18,144 +17,13 @@ import porepy as pp
 logger = logging.getLogger(__name__)
 
 
-class FractureSet(object):
-    """ Class representation of a set of fractures in a 2D domain.
+class StochasticFractureGenerator(object):
+    """ Factory class for stochastic fracture networks.
 
-    The fractures are represented by their endpoints. Poly-line fractures are
-    currently not supported. There is no requirement or guarantee that the
-    fractures are contained within the specified domain. The fractures can be
-    cut to a given domain by the function constrain_to_domain().
-
-    The main intended usage is to fit statistical distributions to the fractures,
-    and use this to generate realizations based on this statistics. The statistical
-    properties of the fracture set is characterized in terms of fracture position,
-    length and angle.
-
-    It is assumed that the fractures can meaningfully be represented by a single
-    statistical distribution. To achieve this, it may be necessary to divide a
-    fracture network into several sets, and fit them separately. As an example,
-    a network where the fractures have one out of two orientations which are orthogonal
-    to each other will not be meaningfully be represented as a single set.
-
-    Attributes:
-        pts (np.array, 2 x num_pts): Start and endpoints of the fractures. Points
-            can be shared by fractures.
-        edges (np.array, (2 + num_tags) x num_fracs): The first two rows represent
-            indices, refering to pts, of the start and end points of the fractures.
-            Additional rows are optional tags of the fractures.
-        domain (dictionary): The domain in which the fracture set is defined.
-            Should contain keys 'xmin', 'xmax', 'ymin', 'ymax', each of which
-            maps to a double giving the range of the domain. The fractures need
-            not lay inside the domain.
-        num_frac (int): Number of fractures in the domain.
+    The fractures generated are described by their orientation, length and location
+    of their center points.
 
     """
-
-    def __init__(self, pts=None, edges=None, domain=None, tol=1e-8):
-        """ Define the frature set.
-
-        Parameters:
-            pts (np.array, 2 x n): Start and endpoints of the fractures. Points
-            can be shared by fractures.
-        edges (np.array, (2 + num_tags) x num_fracs): The first two rows represent
-            indices, refering to pts, of the start and end points of the fractures.
-            Additional rows are optional tags of the fractures.
-        domain (dictionary): The domain in which the fracture set is defined.
-            Should contain keys 'xmin', 'xmax', 'ymin', 'ymax', each of which
-            maps to a double giving the range of the domain.
-
-        """
-
-        self.pts = pts
-        self.edges = edges
-        self.domain = domain
-        self.tol = tol
-
-        if edges is not None:
-            self.num_frac = self.edges.shape[1]
-        else:
-            self.num_frac = 0
-
-        if pts is None and edges is None:
-            logger.info("Generated empty fracture set")
-        else:
-            logger.info("Generated a fracture set with %i fractures", self.num_frac)
-            if pts.size > 0:
-                logger.info(
-                    "Minimum point coordinates x: %.2f, y: %.2f",
-                    pts[0].min(),
-                    pts[1].min(),
-                )
-                logger.info(
-                    "Maximum point coordinates x: %.2f, y: %.2f",
-                    pts[0].max(),
-                    pts[1].max(),
-                )
-        if domain is not None:
-            logger.info("Domain specification :" + str(domain))
-
-    def add(self, fs):
-        """ Add this fracture set to another one, and return a new set.
-
-        The new set may contain non-unique points and edges.
-
-        WARNING: Tags, in FractureSet.edges[2:] are preserved. If the two sets have different
-        set of tags, the necessary rows and columns are filled with what is essentially
-        random values.
-
-        Parameters:
-            fs (FractureSet): Another set to be added
-
-        Returns:
-            New fracture set, containing all points and edges in both self and
-                fs.
-        """
-        logger.info("Add fracture sets: ")
-        logger.info(str(self))
-        logger.info(str(fs))
-
-        p = np.hstack((self.pts, fs.pts))
-        e = np.hstack((self.edges[:2], fs.edges[:2] + self.pts.shape[1]))
-
-        if self.edges.shape[0] > 2:
-            self_tags = self.edges[2:]
-        else:
-            self_tags = np.empty((0, self.num_frac))
-        if fs.edges.shape[0] > 2:
-            fs_tags = fs.edges[2:]
-        else:
-            fs_tags = np.empty((0, fs.num_frac))
-        if self_tags.size > 0 or fs_tags.size > 0:
-            n_self = self_tags.shape[0]
-            n_fs = fs_tags.shape[0]
-            if n_self < n_fs:
-                extra_tags = np.empty((n_fs - n_self, self.num_frac), dtype=np.int)
-                self_tags = np.vstack((self_tags, extra_tags))
-            elif n_self > n_fs:
-                extra_tags = np.empty((n_self - n_fs, fs.num_frac), dtype=np.int)
-                fs_tags = np.vstack((fs_tags, extra_tags))
-            tags = np.hstack((self_tags, fs_tags)).astype(np.int)
-            e = np.vstack((e, tags))
-
-        domain = {
-            "xmin": np.minimum(self.domain["xmin"], fs.domain["xmin"]),
-            "xmax": np.maximum(self.domain["xmax"], fs.domain["xmax"]),
-            "ymin": np.minimum(self.domain["ymin"], fs.domain["ymin"]),
-            "ymax": np.maximum(self.domain["ymax"], fs.domain["ymax"]),
-        }
-
-        return FractureSet(p, e, domain)
-
-    def mesh(self, tol, mesh_args, do_snap=True):
-
-        p = self.pts
-        e = self.edges
-
-        if do_snap:
-            p, _ = pp.frac_utils.snap_fracture_set_2d(p, e, snap_tol=tol)
-        frac_dict = {"points": p, "edges": e}
-        gb = pp.meshing.simplex_grid(frac_dict, self.domain, tol=tol, **mesh_args)
-        return gb
 
     def fit_distributions(self, **kwargs):
         """ Fit statistical distributions to describe the fracture set.
@@ -524,6 +392,7 @@ class FractureSet(object):
 
         return FractureSet(p, e, domain)
 
+<<<<<<< b6bc8bfc3ed6302b3d7c164e844213e853b91617
     # --------- Methods for manipulation of the fracture set geometry
 
     def snap(self, threshold):
@@ -845,6 +714,8 @@ class FractureSet(object):
 
     def __repr__(self):
         return self.__str__()
+=======
+>>>>>>> Reworked FractureSets class into a generator for fracture networks
 
 
 class ChildFractureSet(FractureSet):
