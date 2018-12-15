@@ -9,12 +9,89 @@ import numpy as np
 import scipy
 import scipy.stats as stats
 import logging
+import pdb
 
-from examples.papers.flow_upscaling import frac_gen, fracture_network_analysis
+from examples.papers.flow_upscaling import fracture_network_analysis
+from examples.papers.stochastic_topology import distributions
 import porepy as pp
 
 
 logger = logging.getLogger(__name__)
+
+
+class StochasticFractureNetwork2d(pp.FractureNetwork2d):
+    def __init__(self, pts=None, edges=None, domain=None, network=None, tol=1e-8):
+        if network is not None:
+            pts = network.pts
+            edges = network.edges
+            domain = network.domain
+            tol = network.tol
+        super(StochasticFractureNetwork2d, self).__init__(
+            pts=pts, edges=edges, domain=domain, tol=tol
+        )
+
+        if self.edges.shape[0] == 2:
+            self.edges = np.vstack(
+                (self.edges, np.zeros((1, self.num_frac), dtype=np.int))
+            )
+
+        self.branches = self.num_frac * [[]]
+
+        for fi in range(self.num_frac):
+            self.branches[fi] = self.pts[:, self.edges[:2, fi]]
+
+    def add_fracture(self, p0, p1, tag=None):
+
+        num_pts = self.pts.shape[1]
+
+        pt_arr = np.hstack((p0.reshape((-1, 1)), p1.reshape((-1, 1))))
+        self.pts = np.hstack((self.pts, pt_arr))
+        e = np.array([[num_pts], [num_pts + 1], [tag]], dtype=np.int)
+        self.edges = np.hstack((self.edges, e))
+
+        self.branches.append(pt_arr)
+        self.num_frac += 1
+
+    def _sort_branch_points(self, fi, p):
+        start = self.start_points(fi)
+
+        dist = np.sum((p - start) ** 2, axis=0)
+        return p[:, np.argsort(dist)]
+
+    def add_branch(self, fi, p):
+        loc_branches = np.hstack((self.branches[fi], p.reshape((-1, 1))))
+        loc_branches = self._sort_branch_points(fi, loc_branches)
+
+    def branch_length(self, fi=None):
+        if fi is None:
+            fi = np.arange(self.num_frac)
+        lengths = np.array(fi.size, dtype=np.object)
+        for f in fi:
+            lengths[f] = np.sqrt(
+                np.sum(
+                    (self.branches[f][:, 1:] - self.branches[f][:, :-1]) ** 2, axis=0
+                )
+            )
+
+        return np.atleast_2d(lengths)
+
+    def constrain_to_domain(self, domain=None):
+        network = super(StochasticFractureNetwork2d, self).constrain_to_domain(domain)
+        return StochasticFractureNetwork2d(network=network)
+
+    def __str__(self):
+        s = "Stochastic fracture set consisting of " + str(self.num_frac) + " fractures"
+        if self.pts is not None:
+            s += ", consisting of " + str(self.pts.shape[1]) + " points.\n"
+        else:
+            s += ".\n"
+        if self.domain is not None:
+            s += "Domain: "
+            s += str(self.domain)
+        return s
+
+    def __repr__(self):
+        return self.__str__()
 
 
 class StochasticFractureGenerator(object):
@@ -24,10 +101,14 @@ class StochasticFractureGenerator(object):
     of their center points.
 
     """
-    def __init__(self, dist_length=None, dist_orientation=None, dist_spacing=None):
+
+    def __init__(
+        self, dist_length=None, dist_orientation=None, dist_spacing=None, domain=None
+    ):
         self.dist_length = dist_length
         self.dist_orientation = dist_orientation
         self.intensity = dist_spacing
+        self.domain = domain
 
     def fit_distributions(self, **kwargs):
         """ Fit statistical distributions to describe the fracture set.
@@ -241,6 +322,7 @@ class StochasticFractureGenerator(object):
 
         """
         num_frac = lengths.size
+        # pdb.set_trace()
 
         start = p + 0.5 * lengths * np.vstack((np.cos(angles), np.sin(angles)))
         end = p - 0.5 * lengths * np.vstack((np.cos(angles), np.sin(angles)))
@@ -250,7 +332,30 @@ class StochasticFractureGenerator(object):
         e = np.vstack((np.arange(num_frac), num_frac + np.arange(num_frac)))
         return pts, e
 
-    def _define_centers_by_boxes(self, domain, distribution="poisson"):
+    def domain_measure(self, domain=None):
+        """ Get the measure (length, area) of a given box domain, specified by its
+        extensions stored in a dictionary.
+
+        The dimension of the domain is inferred from the dictionary fields.
+
+        Parameters:
+            domain (dictionary, optional): Should contain keys 'xmin' and 'xmax'
+                specifying the extension in the x-direction. If the domain is 2d,
+                it should also have keys 'ymin' and 'ymax'. If no domain is specified
+                the domain of this object will be used.
+
+        Returns:
+            double: Measure of the domain.
+
+        """
+        if domain is None:
+            domain = self.domain
+        if "ymin" and "ymax" in domain.keys():
+            return (domain["xmax"] - domain["xmin"]) * (domain["ymax"] - domain["ymin"])
+        else:
+            return domain["xmax"] - domain["xmin"]
+
+    def _define_centers_by_boxes(self, domain, distribution="poisson", intensity=None):
         """ Define center points of fractures, intended used in a marked point
         process.
 
@@ -284,9 +389,9 @@ class StochasticFractureGenerator(object):
         """
         if distribution != "poisson":
             return ValueError("Only Poisson point processes have been implemented")
-
         # Intensity scaled to this domain
-        intensity = self.intensity * self.domain_measure(domain)
+        if intensity is None:
+            intensity = self.intensity * self.domain_measure(domain)
 
         nx, ny = intensity.shape
         num_boxes = intensity.size
@@ -327,7 +432,9 @@ class StochasticFractureGenerator(object):
             [pts[i][:, j] for i in range(pts.size) for j in range(pts[i].shape[1])]
         ).T
 
-    def _decompose_domain(self, domain, nx, ny=None):
+    def _decompose_domain(self, domain=None, nx=1, ny=1):
+        if domain is None:
+            domain = self.domain
         x0 = domain["xmin"]
         dx = (domain["xmax"] - domain["xmin"]) / nx
 
@@ -338,7 +445,31 @@ class StochasticFractureGenerator(object):
         else:
             return x0, dx
 
-    def generate(self, domain=None, fit_distributions=True, **kwargs):
+    def _generate_from_distribution(self, num_fracs, dist_a):
+        if isinstance(dist_a, dict):
+            if isinstance(dist_a["param"], dict):
+                return dist_a["dist"].rvs(**dist_a["param"], size=num_fracs)
+            else:
+                return dist_a["dist"].rvs(*dist_a["param"], size=num_fracs)
+        else:
+            return dist_a.rvs(size=num_fracs)
+
+    def _candidate_is_too_close(self, p_new, p, data):
+        # Measure distance from a new fracture to existing fractures
+        if p.shape[1] < 2:
+            return False
+
+        start_set = p[:, ::2]
+        end_set = p[:, 1::2]
+
+        dist, *rest = pp.cg.dist_segment_segment_set(
+            p_new[:, 0], p_new[:, 1], start_set, end_set
+        )
+
+        allowed_dist = data.get("minimum_fracture_spacing", 0)
+        return dist.min() < allowed_dist
+
+    def _generate_by_intensity(self, domain):
         """ Generate a realization of a fracture network from the statistical distributions
         represented in this object.
 
@@ -377,9 +508,6 @@ class StochasticFractureGenerator(object):
         if domain is None:
             domain = self.domain
 
-        if fit_distributions:
-            self.fit_distributions()
-
         # First define points
         p_center = self._define_centers_by_boxes(domain)
         # bookkeeping
@@ -389,340 +517,111 @@ class StochasticFractureGenerator(object):
             num_fracs = p_center.shape[1]
 
         # Then assign length and orientation
-        angles = frac_gen.generate_from_distribution(num_fracs, self.dist_angle)
-        lengths = frac_gen.generate_from_distribution(num_fracs, self.dist_length)
+        angles = self._generate_from_distribution(num_fracs, self.dist_angle)
+        lengths = self._generate_from_distribution(num_fracs, self.dist_length)
 
         p, e = self._fracture_from_center_angle_length(p_center, angles, lengths)
 
-        return pp.FractureNetwork2d(p, e, domain)
+        return p, e
 
-<<<<<<< b6bc8bfc3ed6302b3d7c164e844213e853b91617
-    # --------- Methods for manipulation of the fracture set geometry
+    def generate(self, criterion, data, return_network=True):
+        if "domain" not in data.keys():
+            data["domain"] = self.domain
+        if criterion.lower().strip() == "counting":
+            num_frac = 0
+            p = np.zeros((2, 0))
+            while num_frac < data["target_number"]:
+                loc_p = self._generate_single_fracture(data)
+                if not self._candidate_is_too_close(loc_p, p, data):
+                    p = np.c_[p, loc_p]
+                    num_frac += 1
 
-    def snap(self, threshold):
-        """ Modify point definition so that short branches are removed, and
-        almost intersecting fractures become intersecting.
+            e = np.vstack((2 * np.arange(num_frac), 1 + 2 * np.arange(num_frac)))
 
-        Parameters:
-            threshold (double): Threshold for geometric modifications. Points and
-                segments closer than the threshold may be modified.
+        elif criterion.lower().strip() == "intensity":
+            # Generate from specified intensity map
+            p, e = self._generate_by_intensity()
 
-        Returns:
-            FractureSet: A new FractureSet with modified point coordinates.
-        """
+        elif criterion.lower().strip() == "length":
 
-        # We will not modify the original fractures
-        p = self.pts.copy()
-        e = self.edges.copy()
+            def dist_points(a, b):
+                return np.sqrt(np.sum((a - b) ** 2))
 
-        # Prolong
-        p = pp.cg.snap_points_to_segments(p, e, threshold)
+            full_length = 0
+            p = np.zeros((2, 0))
+            while full_length < data["target_length"]:
+                loc_p = self._generate_single_fracture(data)
+                if not self._candidate_is_too_close(loc_p, p, data):
+                    p = np.c_[p, loc_p]
+                    full_length += dist_points(loc_p[:, 0], loc_p[:, 1])
 
-        return FractureSet(p, e, self.domain)
+            num_frac = p.shape[1] / 2
+            e = np.vstack((2 * np.arange(num_frac), 1 + 2 * np.arange(num_frac)))
 
-    def branches(self):
-        """ Split the fractures into branches.
-
-        Returns:
-            np.array (2 x npt): Start and endpoint of the fracture branches,
-                that is, start and end points of fractures, as well as intersection
-                points.
-            np.array (3 x npt): Connections between points that form branches.
-                The first two rows represent indices of the start and end points
-                of the branches. The third gives the index of the fracture to which
-                the branch belongs, referring to the ordering in self.num_frac
-
-        """
-        p = self.pts.copy()
-        e = np.vstack((self.edges.copy(), np.arange(self.num_frac)))
-        return pp.cg.remove_edge_crossings(p, e, tol=self.tol)
-
-    def constrain_to_domain(self, domain=None):
-        """ Constrain the fracture network to lay within a specified domain.
-
-        Fractures that cross the boundary of the domain will be cut to lay
-        within the boundary. Fractures that lay completely outside the domain
-        will be dropped from the constrained description.
-
-        TODO: Also return an index map from new to old fractures.
-
-        Parameters:
-            domain (dictionary, None): Domain specification, in the form of a
-                dictionary with fields 'xmin', 'xmax', 'ymin', 'ymax'. If not
-                provided, the domain of this object will be used.
-
-        Returns:
-            FractureSet: Initialized by the constrained fractures, and the
-                specified domain.
-
-        """
-        if domain is None:
-            domain = self.domain
-
-        p_domain = self._domain_to_points(domain)
-
-        p, e = pp.cg.constrain_lines_by_polygon(p_domain, self.pts, self.edges)
-
-        return FractureSet(p, e, domain)
-
-    def _domain_to_points(self, domain):
-        """ Helper function to convert a domain specification in the form of
-        a dictionary into a point set.
-        """
-        if domain is None:
-            domain = self.domain
-
-        p00 = np.array([domain["xmin"], domain["ymin"]]).reshape((-1, 1))
-        p10 = np.array([domain["xmax"], domain["ymin"]]).reshape((-1, 1))
-        p11 = np.array([domain["xmax"], domain["ymax"]]).reshape((-1, 1))
-        p01 = np.array([domain["xmin"], domain["ymax"]]).reshape((-1, 1))
-        return np.hstack((p00, p10, p11, p01))
-
-    # --------- Methods for analysis of the fracture set
-
-    def as_graph(self, split_intersections=True):
-        """ Represent the fracture set as a graph, using the networkx data structure.
-
-        By default the fractures will first be split into non-intersecting branches.
-
-        Parameters:
-            split_intersections (boolean, optional): If True (default), the network
-                is split into non-intersecting branches before invoking the graph
-                representation.
-
-        Returns:
-            networkx.graph: Graph representation of the network, using the networkx
-                data structure.
-            FractureSet: This fracture set, split into non-intersecting branches.
-                Only returned if split_intersections is True
-
-        """
-        if split_intersections:
-            split_network = self.split_intersections()
-            pts = split_network.pts
-            edges = split_network.edges
         else:
-            edges = self.edges
-            pts = self.pts
+            raise ValueError("Unknown truncation rule" + str(criterion))
 
-        G = nx.Graph()
-        for pi in range(pts.shape[1]):
-            G.add_node(pi, coordinate=pts[:, pi])
-
-        for ei in range(edges.shape[1]):
-            G.add_edge(edges[0, ei], edges[1, ei])
-
-        if split_intersections:
-            return G, split_network
+        if return_network:
+            return StochasticFractureNetwork2d(
+                p, e.astype(np.int), domain=data["domain"]
+            )
         else:
-            return G
+            return p, e.astype(np.int)
 
-    def split_intersections(self):
-        """ Create a new FractureSet, with all fracture intersections removed
+    def _generate_single_fracture(self, data):
+        if self.intensity is None:
+            self.intensity = np.array([[10 / self.domain_measure()]])
 
-        Returns:
-            FractureSet: New set, where all intersection points are added so that
-                the set only contains non-intersecting branches.
+        while True:
+            cp_tmp = self._generate_centers(center_mode="poisson", data=data)
+            if cp_tmp.size > 0:
+                break
 
-        """
-        p, e = pp.cg.remove_edge_crossings2(self.pts, self.edges, tol=self.tol)
-        return FractureSet(p, e, self.domain)
+        # If the intensity map has several blocks, there will be a spatial
+        # ordering associated with cp. Shuffle the
+        shuffle_ind = np.argsort(np.random.rand(cp_tmp.shape[-1]))
+        #   pdb.set_trace()
+        cp = cp_tmp[:, shuffle_ind][:, 0].reshape((-1, 1))
 
-    # --------- Utility functions below here
+        orientation = self._generate_from_distribution(1, self.dist_orientation)
+        lengths = self._generate_from_distribution(1, self.dist_length)
+        return self._fracture_from_center_angle_length(cp, orientation, lengths)[0]
 
-    def start_points(self, fi=None):
-        """ Get start points of all fractures, or a subset.
+    def _generate_centers(self, center_mode, data):
+        domain = data.get("domain")
+        if center_mode.lower().strip() == "poisson":
+            intensity = data.get("center_intensity_map", None)  # Or self.intensity?
 
-        Parameters:
-            fi (np.array or int, optional): Index of the fractures for which the
-                start point should be returned. Either a numpy array, or a single
-                int. In case of multiple indices, the points are returned in the
-                order specified in fi. If not specified, all start points will be
-                returned.
+            cp = self._define_centers_by_boxes(intensity=intensity, domain=domain)
 
-        Returns:
-            np.array, 2 x num_frac: Start coordinates of all fractures.
+        elif center_mode.lower().strip() == "ladder":
+            center_line = data.get("center_line").reshape((-1, 1))
+            center_line = center_line / np.linalg.norm(center_line)
+            start_of_line = data.get("center_line_start")
+            spacing_along = data.get("spacing_along_line")
+            cp = [start_of_line]
+            counter = 0
+            # Generate points along the line
+            while True:
+                dx = spacing_along.draw(1)
+                cp.append(cp[counter] + center_line * dx)
+                counter += 1
+            # Perturb orthorgonally to the line
+            wing_line = center_line[::-1]
 
-        """
-        if fi is None:
-            fi = np.arange(self.num_frac)
+            perturbation_across = data.get("perturbation_across_line", None)
+            if perturbation_across is None:
+                perturbation_across = distributions.Uniform(0)
 
-        p = self.pts[:, self.edges[0, fi]]
-        # Always return a 2-d array
-        if p.size == 2:
-            p = p.reshape((-1, 1))
-        return p
-
-    def end_points(self, fi=None):
-        """ Get start points of all fractures, or a subset.
-
-        Parameters:
-            fi (np.array or int, optional): Index of the fractures for which the
-                end point should be returned. Either a numpy array, or a single
-                int. In case of multiple indices, the points are returned in the
-                order specified in fi. If not specified, all end points will be
-                returned.
-
-        Returns:
-            np.array, 2 x num_frac: End coordinates of all fractures.
-
-        """
-        if fi is None:
-            fi = np.arange(self.num_frac)
-
-        p = self.pts[:, self.edges[1, fi]]
-        # Always return a 2-d array
-        if p.size == 2:
-            p = p.reshape((-1, 1))
-        return p
-
-    def get_points(self, fi=None):
-        """ Return start and end points for a specified fracture.
-
-        Parameters:
-            fi (np.array or int, optional): Index of the fractures for which the
-                end point should be returned. Either a numpy array, or a single
-                int. In case of multiple indices, the points are returned in the
-                order specified in fi. If not specified, all end points will be
-                returned.
-
-        Returns:
-            np.array, 2 x num_frac: End coordinates of all fractures.
-            np.array, 2 x num_frac: End coordinates of all fractures.
-
-        """
-        return self.start_points(fi), self.end_points(fi)
-
-    def length(self, fi=None):
-        """
-        Compute the total length of the fractures, based on the fracture id.
-        The output array has length as unique(frac) and ordered from the lower index
-        to the higher.
-
-        Parameters:
-            fi (np.array, or int): Index of fracture(s) where length should be
-                computed. Refers to self.edges
-
-        Return:
-            np.array: Length of each fracture
-
-        """
-        if fi is None:
-            fi = np.arange(self.num_frac)
-        fi = np.asarray(fi)
-
-        # compute the length for each segment
-        norm = lambda e0, e1: np.linalg.norm(self.pts[:, e0] - self.pts[:, e1])
-        l = np.array([norm(e[0], e[1]) for e in self.edges.T])
-
-        # compute the total length based on the fracture id
-        tot_l = lambda f: np.sum(l[np.isin(fi, f)])
-        return np.array([tot_l(f) for f in np.unique(fi)])
-
-    def angle(self, fi=None):
-        """ Compute the angle of the fractures to the x-axis.
-
-        Parameters:
-            fi (np.array, or int): Index of fracture(s) where length should be
-                computed. Refers to self.edges
-
-        Return:
-            angle: Orientation of each fracture, relative to the x-axis.
-                Measured in radians, will be a number between 0 and pi.
-
-        """
-        if fi is None:
-            fi = np.arange(self.num_frac)
-        fi = np.asarray(fi)
-
-        # compute the angle for each segment
-        alpha = lambda e0, e1: np.arctan2(
-            self.pts[1, e0] - self.pts[1, e1], self.pts[0, e0] - self.pts[0, e1]
-        )
-        a = np.array([alpha(e[0], e[1]) for e in self.edges.T])
-
-        # compute the mean angle based on the fracture id
-        mean_alpha = lambda f: np.mean(a[np.isin(fi, f)])
-        mean_a = np.array([mean_alpha(f) for f in np.unique(fi)])
-
-        # we want only angles in (0, pi)
-        mask = mean_a < 0
-        mean_a[mask] = np.pi - np.abs(mean_a[mask])
-        mean_a[mean_a > np.pi] -= np.pi
-
-        return mean_a
-
-    def compute_center(self, p=None, edges=None):
-        """ Compute center points of a set of fractures.
-
-        Parameters:
-            p (np.array, 2 x n , optional): Points used to describe the fractures.
-                defaults to the fractures in this set.
-            edges (np.array, 2 x num_frac, optional): Indices, refering to pts, of the start
-                and end points of the fractures for which the centres should be computed.
-                Defaults to the fractures of this set.
-
-        Returns:
-            np.array, 2 x num_frac: Coordinates of the centers of this fracture.
-
-        """
-        if p is None:
-            p = self.pts
-        if edges is None:
-            edges = self.edges
-        # first compute the fracture centres and then generate them
-        avg = lambda e0, e1: 0.5 * (np.atleast_2d(p)[:, e0] + np.atleast_2d(p)[:, e1])
-        pts_c = np.array([avg(e[0], e[1]) for e in edges.T]).T
-        return pts_c
-
-    def domain_measure(self, domain=None):
-        """ Get the measure (length, area) of a given box domain, specified by its
-        extensions stored in a dictionary.
-
-        The dimension of the domain is inferred from the dictionary fields.
-
-        Parameters:
-            domain (dictionary, optional): Should contain keys 'xmin' and 'xmax'
-                specifying the extension in the x-direction. If the domain is 2d,
-                it should also have keys 'ymin' and 'ymax'. If no domain is specified
-                the domain of this object will be used.
-
-        Returns:
-            double: Measure of the domain.
-
-        """
-        if domain is None:
-            domain = self.domain
-        if "ymin" and "ymax" in domain.keys():
-            return (domain["xmax"] - domain["xmin"]) * (domain["ymax"] - domain["ymin"])
+            for pi, p in enumerate(cp):
+                cp[pi] = p + wing_line * perturbation_across.rvs(1)
         else:
-            return domain["xmax"] - domain["xmin"]
+            raise ValueError("Unknown center distribution " + center_mode)
 
-    def plot(self, **kwargs):
-        """ Plot the fracture set.
+        return cp
 
-        The function passes this fracture set to PorePy plot_fractures
 
-        Parameters:
-            **kwargs: Keyword arguments to be passed on to matplotlib.
-
-        """
-        pp.plot_fractures(self.domain, self.pts, self.edges, **kwargs)
-
-    def __str__(self):
-        s = "Fracture set consisting of " + str(self.num_frac) + " fractures,"
-        s += " consisting of " + str(self.pts.shape[1]) + " points.\n"
-        s += "Domain: "
-        s += str(self.domain)
-        return s
-
-    def __repr__(self):
-        return self.__str__()
-=======
->>>>>>> Reworked FractureSets class into a generator for fracture networks
-
-class FractureChildrenGenerator():
-
+class FractureChildrenGenerator(StochasticFractureGenerator):
     def compute_density_along_line(self, p, start, end, **kwargs):
 
         p_x, loc_edge, domain_loc, _ = self._project_points_to_line(p, start, end)
@@ -765,7 +664,7 @@ class FractureChildrenGenerator():
         return p_x, loc_edge, domain_loc, theta
 
     def generate(self):
-        raise ValueError('Not implemented. Use a subclass')
+        raise ValueError("Not implemented. Use a subclass")
 
     def _draw_num_children(self, parent_realiz, pi):
         """ Draw the number of children for a fracture based on the statistical
@@ -782,9 +681,562 @@ class FractureChildrenGenerator():
         return np.round(nc * parent_realiz.length()[pi]).astype(np.int)[0]
 
 
+class ConstrainedChildrenGenerator(StochasticFractureGenerator):
+    def __init__(self, parent, side_distribution=None, **kwargs):
+        super(ConstrainedChildrenGenerator, self).__init__(**kwargs)
+
+        self.parent = parent
+
+        if side_distribution is None:
+            self.dist_side = distributions.Signum()
+
+    def generate(self, pi=None, data=None):
+        """ Generate a fracture that has one node on a parent fracture.
+
+        The fracture is constructed as a ray from the parent point, with length and
+        orientation drawn according to the specified statistical distributions.
+
+        The generated fracture may cross other fractures, parents or children.
+
+        """
+        if pi is None:
+            pi = self._pick_parent()
+
+        # Assign equal probability that the points are on each side of the parent
+        side = self._generate_from_distribution(1, self.dist_side)
+
+        # Draw length and distribution
+        child_angle = self._generate_from_distribution(1, self.dist_orientation)
+        child_length = self._generate_from_distribution(1, self.dist_length)
+        # Vector that spans the segment of the new fracture
+        vec = np.vstack((np.cos(child_angle), np.sin(child_angle))) * child_length
+
+        # Place the new fracture randomly along the chosen parent
+        parent_start, parent_end = self.parent.get_points(pi)
+        along_parent = parent_end - parent_start
+        child_start = parent_start + np.random.rand(1) * along_parent
+
+        child_end = child_start + side * vec
+
+        self.parent.add_branch(pi, child_start)
+
+        return np.hstack((child_start, child_end))
+
+    def _pick_parent(self):
+        # Pick a parent, with probabilities scaling with parent length
+        cum_length = self.parent.length().cumsum()
+        cum_length /= cum_length[-1]
+
+        r = np.random.rand(1)
+        return np.nonzero(r < cum_length)[0][0]
+
+
+class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
+    def __init__(self, parent, side_distribution=None, **kwargs):
+        super(DoublyConstrainedChildrenGenerator, self).__init__(**kwargs)
+
+        self.parent = parent
+
+        if side_distribution is None:
+            self.dist_side = distributions.Signum()
+
+        pair_array, point_first, point_second = self._trace_rays_from_fracture_tips()
+        self._pairs_of_parents(pair_array, point_first, point_second)
+
+    def generate(self, pi=None, data=None):
+        # pi is index of the parent pair
+        if pi is None:
+            pi = self._pick_parent_pair()
+
+        fi = self.pairs[0, pi]
+        si = self.pairs[1, pi]
+
+        # Assign equal probability that the points are on each side of the parent
+        side = self._generate_from_distribution(1, self.dist_side)
+
+        vec = self._get_search_vector()
+
+        start = self.interval_points[pi][:, 0]
+        end = self.interval_points[pi][:, 1]
+
+        along_parent = end - start
+
+        child_start = (start + np.random.rand(1) * along_parent).reshape((-1, 1))
+
+        _, _, _, child_end, *rest = self._find_neighbors(vec, child_start)
+        if child_end.shape[1] > 1:
+            if side > 0:
+                child_end = child_end[:, 0].reshape((-1, 1))
+            else:
+                child_end = child_end[:, 1].reshape((-1, 1))
+
+        self.parent.add_branch(fi, child_start)
+        self.parent.add_branch(si, child_end)
+
+        return np.hstack((child_start, child_end))
+
+    def _pick_parent_pair(self):
+
+        cum_length = self.interval_lengths.cumsum()
+        cum_length /= cum_length[-1]
+        r = np.random.rand(1)
+        return np.nonzero(r < cum_length)[0][0]
+
+
+    def _pairs_of_parents(self, pair_array, point_first, point_second):
+        # Find parents that are visible to each other along a ray of fixed orientation.
+
+        # Parents
+        pairs = []
+        interval_first = {}
+        interval_second = {}
+
+        if len(pair_array) == 0:
+            self.parent_pairs = pairs
+            self.interval_first = interval_first
+            self.interval_second = interval_second
+            return
+
+        for fi in range(self.parent.num_frac):
+
+            hit_first = np.where(pair_array[0] == fi)[0]
+            hit_second = np.where(pair_array[1] == fi)[0]
+
+            start, end = self.parent.get_points(fi)
+            #            a = np.array([point_first[i] for i in hit_first]).squeeze().T
+            #            b = np.array([point_second[i] for i in hit_second]).squeeze().T
+
+            isect_pt = np.hstack(
+                (start, end, point_first[:, hit_first], point_second[:, hit_second])
+            )
+            isect_pt, *rest = pp.utils.setmembership.unique_columns_tol(isect_pt)
+            dist = np.sum((isect_pt - start) ** 2, axis=0)
+
+            p = isect_pt[:, np.argsort(dist)]
+
+            active_neigh_pos = None
+            active_neigh_neg = None
+
+            vec = self._get_search_vector()
+
+            # Loop over intersection points
+            for pi in range(p.shape[1]):
+
+                neigh, second_neigh, pt_self, pt_first, pt_second, is_pos = self._find_neighbors(
+                    vec, p[:, pi].reshape((-1, 1))
+                )
+                #              pdb.set_trace()
+
+                for ni in range(len(neigh)):
+                    loc_neigh = neigh[ni]
+                    loc_second_neigh = second_neigh[ni]
+                    pself = pt_self[:, ni].reshape((-1, 1))
+                    pf = pt_first[:, ni].reshape((-1, 1))
+                    if loc_second_neigh is not None:
+                        try:
+                            psec = pt_second[:, ni].reshape((-1, 1))
+                        except:
+                            psec = pt_second[ni][0].reshape((-1, 1)).astype(np.float)
+                    #                n, pos, sn, pself, pf, psec in zip(neigh, is_pos, second_neigh, pt_self, pt_first, pt_second):
+                    if is_pos[ni]:
+                        # Check if there currently is a neighbor on this side
+                        if active_neigh_pos is None:
+                            # We have found the start of a new neighbor
+                            active_neigh_pos = loc_neigh
+                            pairs.append((fi, loc_neigh))
+                            pos_pt_self = pself
+                            pos_pt_other = pf
+                            active_pos_pair = (fi, loc_neigh)
+
+                        else:
+                            # We found (this fracture was hit by) the end of a neighbor.
+                            # TODO: Or the fracture itself ends
+                            # The next neighbor is the second closest to the hit point in
+                            # the direction of vec
+                            if active_pos_pair in interval_second.keys():
+                                tmp = interval_first[active_pos_pair]
+                                tmp.append(np.hstack((pos_pt_self, pself)))
+                                interval_first[active_pos_pair] = tmp
+                            else:
+                                interval_first[active_pos_pair] = [
+                                    np.hstack((pos_pt_self, pself))
+                                ]
+
+                            # pdb.set_trace()
+                            if active_neigh_pos == loc_neigh:
+                                active_neigh_pos = loc_second_neigh
+                                if active_pos_pair in interval_second.keys():
+                                    tmp = interval_second[active_pos_pair]
+                                    tmp.append(np.hstack((pos_pt_other, pf)))
+                                    interval_second[active_pos_pair] = tmp
+                                else:
+                                    interval_second[active_pos_pair] = [
+                                        np.hstack((pos_pt_other, pf))
+                                    ]
+
+                            else:
+                                active_neigh_pos = loc_neigh
+                                if active_pos_pair in interval_second.keys():
+                                    tmp = interval_second[active_pos_pair]
+                                    tmp.append(np.hstack((pos_pt_other, psec)))
+                                    interval_second[active_pos_pair] = tmp
+                                else:
+                                    interval_second[active_pos_pair] = [
+                                        np.hstack((pos_pt_other, psec))
+                                    ]
+                            # End the current interval
+
+                            if pi < (p.shape[1] - 1) and active_neigh_pos is not None:
+                                pairs.append((fi, active_neigh_pos))
+                                pos_pt_self = pself
+                                if active_neigh_pos == loc_neigh:
+                                    pos_pt_other = pf
+                                else:
+                                    pos_pt_other = psec
+                                active_pos_pair = (fi, active_neigh_pos)
+                    else:
+                        # pdb.set_trace()
+                        # Check if there currently is a neighbor on this side
+                        if active_neigh_neg is None:
+                            # We have found the start of a new neighbor
+                            active_neigh_neg = loc_neigh
+                            pairs.append((fi, loc_neigh))
+                            neg_pt_self = pself
+                            neg_pt_other = pf
+                            active_neg_pair = (fi, loc_neigh)
+
+                        else:
+                            # We found (this fracture was hit by) the end of a neighbor.
+                            # The next neighbor is the second closest to the hit point in
+                            # the direction of vec
+                            if active_neg_pair in interval_second.keys():
+                                tmp = interval_first[active_neg_pair]
+                                tmp.append(np.hstack((neg_pt_self, pself)))
+                                interval_first[active_neg_pair] = tmp
+                            else:
+                                interval_first[active_neg_pair] = [
+                                    np.hstack((neg_pt_self, pself))
+                                ]
+
+                            # pdb.set_trace()
+                            if active_neigh_neg == loc_neigh:
+                                active_neigh_neg = loc_second_neigh
+                                if active_neg_pair in interval_second.keys():
+                                    tmp = interval_second[active_neg_pair]
+                                    tmp.append(np.hstack((neg_pt_other, pf)))
+                                    interval_second[active_neg_pair] = tmp
+                                else:
+                                    interval_second[active_neg_pair] = [
+                                        np.hstack((neg_pt_other, pf))
+                                    ]
+                            else:
+                                active_neigh_neg = loc_neigh
+                                if active_neg_pair in interval_second.keys():
+                                    tmp = interval_second[active_neg_pair]
+                                    tmp.append(np.hstack((neg_pt_other, psec)))
+                                    interval_second[active_neg_pair] = tmp
+                                else:
+                                    interval_second[active_neg_pair] = [
+                                        np.hstack((neg_pt_other, psec))
+                                    ]
+
+                            # End the current interval
+
+                            if pi < (p.shape[1] - 1) and active_neigh_neg is not None:
+                                pairs.append((fi, active_neigh_neg))
+                                neg_pt_self = pself
+                                if active_neigh_neg == loc_neigh:
+                                    neg_pt_other = pf
+                                else:
+                                    neg_pt_other = psec
+                                active_neg_pair = (fi, active_neigh_neg)
+
+        pairs = np.array([p for p in pairs]).T
+        del_ind = []
+        for fi in range(pairs.shape[1]):
+            f = pairs[0, fi]
+            s = pairs[1, fi]
+            other = np.where(
+                np.logical_or(
+                    np.logical_and(pairs[0] == f, pairs[1] == s),
+                    np.logical_and(pairs[0] == s, pairs[1] == f),
+                )
+            )[0]
+            assert other.size >= 1
+            if f < s:
+                for tmp in other:
+                    if tmp > fi:
+                        del_ind.append(tmp)
+                try:
+                    interval_first.pop((s, f))
+                    interval_second.pop((s, f))
+                except:
+                    continue
+
+        del_ind = np.unique(np.asarray(del_ind))
+        pairs = np.delete(pairs, del_ind, axis=1)
+        #        pdb.set_trace()
+        self.parent_pairs = pairs
+        self.interval_first = interval_first
+        self.interval_second = interval_second
+
+        points = []
+        lengths = []
+        parent_pair = []
+
+        for k, v in interval_first.items():
+            for p in v:
+                l = np.sqrt(np.sum((p[:, 1] - p[:, 0])**2))
+                lengths.append(l)
+                points.append(p)
+                parent_pair.append(k)
+
+        self.pairs = np.array([p for p in parent_pair]).T
+        self.interval_lengths = np.cumsum(lengths)
+        self.interval_points = points
+
+    def _compare_arrays(self, a, b, tol=1e-4):
+        """ Compare two arrays and check that they are equal up to a column permutation.
+
+        Typical usage is to compare coordinate arrays.
+
+        Parameters:
+            a, b (np.array): Arrays to be compared. W
+            tol (double, optional): Tolerance used in comparison.
+            sort (boolean, defaults to True): Sort arrays columnwise before comparing
+
+        Returns:
+            True if there is a permutation ind so that all(a[:, ind] == b).
+        """
+        if not np.all(a.shape == b.shape):
+            return False
+
+        for i in range(a.shape[1]):
+            dist = np.sum((b - a[:, i].reshape((-1, 1))) ** 2, axis=0)
+            if dist.min() > tol:
+                return False
+        for i in range(b.shape[1]):
+            dist = np.sum((a - b[:, i].reshape((-1, 1))) ** 2, axis=0)
+            if dist.min() > tol:
+                return False
+        return True
+
+    def _trace_rays_from_fracture_tips(self):
+        """ Identify pairs of fractures that lie in direct sight of each other
+        along a specified angle.
+
+        The pairs are found by tracing rays from the end points of fractures,
+        and look for intersections with other fractures. In the example below,
+        all three (horizontal) left fractures find each other, while the
+        right fractures hits nothing.
+            ___________________
+               /  /     /     /
+              /  /_____/     /
+             /  /     /     /      __________
+            /__/_____/_____/___
+
+        The current al
+
+        Parameters:
+            parents (FractureSet): Fracture set for which we look for pairs.
+            angle (double, radians): Angle of search direction
+
+        Returns:
+            np.array, 2 X num_pairs: Indices of the edges forming unique pairs.
+                Sorted along each column. The columns are ordered so that
+                arr[0] is non-decreasing.
+
+        """
+
+        """
+        Update: The algorithm above will find the intersection points between
+        rays from endpoints of other fractures, but it cannot find all
+        pairs of potential visibility combinations. For this, use a divide and
+        conquer (like?) algorithm: Sort all intersection points from other fractures
+        on the central line. Start on one end of the fracture, the ray from that
+        point will
+
+        for each fracture as main:
+
+
+
+            if the ray hits another fracture, initialize the visibility branches
+                with this pair
+            else:
+                visibility branch is empty, there are no active others
+
+            while there are more intersection points (spatially sorted) with rays from other fractures
+                Check whether the other fracture has been found before (it is active)
+                if yes,
+                    deactivate the other fracture,
+                    mark this interval as a pairing between the main and other fracture
+                    find the fracture on the other side of the other fracture - this is the new active one
+                if not - we are meeting a new active fracture
+                    mark the interval behind us as a pairing of the new and (old) active fracture
+                    update index to new fracture
+
+            To avoid double accounting of pairs, only add to global list if the
+            main fracture has the lower index.
+            If two fractures have multiple common intervals, store this as separate
+            visibility branches
+
+            Data structure necessary: All fractures must have access to intersection
+            points from other fractures.
+            When deactivating a fracture, it should be easy to find the one on the
+            other side.
+
+
+        NOTE: To handle intersections of other fractures, we need to work on
+        branches, not full fractures.
+        """
+        # Data structure for storage
+        parent_pairs = []
+
+        # For all rays that hit another fracture, store the start point of the
+        # ray in the point_first, and the intersection of the ray with the
+        # other fracture in point_second
+        point_first = np.zeros((2, 0))
+        point_second = np.zeros((2, 0))
+
+        # Search direction, use the same for all fractures
+        vec = self._get_search_vector()
+
+        # Loop over all fractures, look for pairs that involves this fracture.
+        # We may find the same pair twice, once for each member of the pair.
+        # Uniqueness is enforced below
+        for fi in range(self.parent.num_frac):
+            # Start and end_points of this fracture
+            start, end = self.parent.get_points(fi)
+
+            loc_pairs, _, loc_isect_first, loc_isect_sec, *rest = self._find_neighbors(
+                vec, start, end
+            )
+            # The ray hit nothing
+            if len(loc_pairs) == 0:
+                continue
+            # We may get up to four hits: One on each side for start and endpoint of the
+            # main fracture.
+            # Stor intersection points
+            point_first = np.hstack((point_first, loc_isect_first))
+            point_second = np.hstack((point_second, loc_isect_sec))
+            # We have found a new pair
+            for pi in range(len(loc_pairs)):
+                parent_pairs.append((fi, loc_pairs[pi]))
+
+        pair_array = np.array([p for p in parent_pairs]).T
+
+        return pair_array, point_first, point_second
+
+    def _get_search_vector(self):
+        """ Get angle of search for intersection.
+        """
+        # We are interested in any intersection in the direction of the specified angle.
+        # Create a vector with the right direction, and length equal to the maximum
+        # size of the domain.
+        _, _, dx, dy = self._decompose_domain()
+        length = np.maximum(dx, dy)
+
+        angle = self._generate_from_distribution(1000, self.dist_orientation).mean()
+        vec = np.vstack((np.cos(angle), np.sin(angle))) * length
+
+        return vec
+
+    def _find_neighbors(self, vec, start, end=None):
+        # The start point of the segments are twice the start, twice the end
+        # of this fracture.
+        import pdb
+        #pdb.set_trace()
+        # Start and endpoints of the parents.
+        start_parent, end_parent = self.parent.get_points()
+
+        if end is None:
+            offshots_start = np.hstack((start, start))
+            start_pos = start + vec
+            start_neg = start - vec
+            # End points of the shooting segments
+            offshots_end = np.hstack((start_pos, start_neg))
+        else:
+            offshots_start = np.hstack((start, start, end, end))
+
+            # From the nodes of this fracture, shoot segments along the vector on
+            # both sides of the fracture.
+            start_pos = start + vec
+            start_neg = start - vec
+            end_pos = end + vec
+            end_neg = end - vec
+            # End points of the shooting segments
+            offshots_end = np.hstack((start_pos, start_neg, end_pos, end_neg))
+
+        neighbor = []
+        second_neighbor = []
+        isect_self = []
+        isect_first = []
+        isect_second = []
+        is_pos = []
+
+        # From the nodes of this fracture, shoot segments along the vector on
+        # both sides of the fracture.
+
+        # Loop over all off-shots, see if they hit other fractures in the set.
+        for oi in range(offshots_start.shape[1]):
+            # Start and endpoint of the offshot
+            s = offshots_start[:, oi].reshape((-1, 1))
+            e = offshots_end[:, oi].reshape((-1, 1))
+            # Compute distance between this point and all other segments in the network
+            d, cp, cg_seg = pp.cg.dist_segment_segment_set(
+                s, e, start_parent, end_parent
+            )
+            # Count hits, where the distance is very small
+            hit = np.where(d < self.parent.tol)[0]
+            if hit.size == 0:
+                # There should be at least one hit, namely the start and end point
+                # of fi
+                raise ValueError("Error when finding pairs of fractures")
+            elif hit.size == 1:
+                # The offshot did not hit anything. We can move on
+                continue
+            else:
+                # The offshot has hit at least one fracture.
+                # Compute distance from all closest points to the start
+                dist_start = np.sqrt(np.sum((s - cp[:, hit]) ** 2, axis=0))
+                # Find the first point along the line, away from the start
+                first_constraint = np.argsort(dist_start)[1]
+                neighbor.append(hit[first_constraint])
+                # Store the intersection point of the first and second
+                # fracture
+                isect_self.append(s)
+                isect_first.append(cp[:, hit[first_constraint]])
+
+                if hit.size > 2:
+                    second_constraint = np.argsort(dist_start)[2]
+                    second_neighbor.append(hit[second_constraint])
+                    isect_second.append(cp[:, hit[second_constraint]])
+                else:
+                    second_neighbor.append(None)
+                    isect_second.append(None)
+
+                is_pos.append(oi % 2 == 0)
+
+        def arr_to_np(a):
+            b = np.array([p for p in a]).T
+            if b.ndim == 3:
+                b = b.squeeze()
+            if b.size == 2:
+                return b.reshape((-1, 1))
+            else:
+                return b
+
+        #        isect_self = np.array([p for p in isect_self]).T
+        #        isect_first = np.array([p for p in isect_first]).T
+        #        isect_second = np.array([p for p in isect_second]).T
+        isect_self = arr_to_np(isect_self)
+        isect_first = arr_to_np(isect_first)
+        isect_second = arr_to_np(isect_second)
+
+        return neighbor, second_neighbor, isect_self, isect_first, isect_second, is_pos
+
+
 class IsolatedFractureChildernGenerator(FractureChildrenGenerator):
-
-
     def _generate_isolated_fractures(self, children_points, start_parent, end_parent):
 
         if children_points.size == 0:
@@ -1129,7 +1581,6 @@ class ChildFractureSet(FractureChildrenGenerator):
 
         return new_child
 
-
     def _draw_children_along_parent(self, parent_realiz, pi, num_children):
         """ Define location of children along the lines of a parent fracture.
 
@@ -1226,7 +1677,6 @@ class ChildFractureSet(FractureChildrenGenerator):
             return is_isolated, is_one_y, is_both_y
         else:
             return is_isolated, np.logical_or(is_one_y, is_both_y)
-
 
     def _generate_y_fractures(self, start, length_distribution=None):
         """ Generate fractures that originates in a parent fracture.
@@ -1409,20 +1859,22 @@ class ChildFractureSet(FractureChildrenGenerator):
                 s = offshots_start[:, oi].reshape((-1, 1))
                 e = offshots_end[:, oi].reshape((-1, 1))
                 # Compute distance between this point and all other segments in the network
-                d, cp, cg_seg = pp.cg.dist_segment_segment_set(s, e, start_parent, end_parent)
+                d, cp, cg_seg = pp.cg.dist_segment_segment_set(
+                    s, e, start_parent, end_parent
+                )
                 # Count hits, where the distance is very small
                 hit = np.where(d < self.tol)[0]
                 if hit.size == 0:
                     # There should be at least one hit, namely the start and end point
                     # of fi
-                    raise ValueError('Error when finding pairs of fractures')
+                    raise ValueError("Error when finding pairs of fractures")
                 elif hit.size == 1:
                     # The offshot did not hit anything. We can move on
                     continue
                 else:
                     # The offshot has hit at least one fracture.
                     # Compute distance from all closest points to the start
-                    dist_start = np.sqrt(np.sum((s - cp[:, hit])**2, axis=0))
+                    dist_start = np.sqrt(np.sum((s - cp[:, hit]) ** 2, axis=0))
                     # Find the first point along the line, away from the start
                     first_constraint = np.argsort(dist_start)[1]
                     parent_pairs.append((fi, first_constraint))
@@ -1640,8 +2092,6 @@ class ChildFractureSet(FractureChildrenGenerator):
             )[0]
 
         return num_occ_all
-
-
 
     def snap(self, threshold):
         """ Modify point definition so that short branches are removed, and

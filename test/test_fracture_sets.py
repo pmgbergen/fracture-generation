@@ -10,10 +10,145 @@ import unittest
 import scipy.stats as stats
 
 import porepy as pp
-from examples.papers.flow_upscaling.fracture_sets import FractureSet, ChildFractureSet
-from examples.papers.flow_upscaling import frac_gen
+from examples.papers.flow_upscaling.fracture_sets import StochasticFractureGenerator, DoublyConstrainedChildrenGenerator
+from examples.papers.stochastic_topology import distributions
+from test import test_utils
+
+class TestStochasticFractureGenerator(unittest.TestCase):
+
+    def setUp(self):
+        self.orientation = distributions.Uniform(0)
+        self.length = distributions.Uniform(1)
+        self.domain = {'xmin': 0, 'xmax': 1, 'ymin': 0, 'ymax': 1}
+        self.generator = StochasticFractureGenerator(dist_length=self.length,
+                                                dist_orientation=self.orientation,
+                                                domain=self.domain)
 
 
+    def test_generate_by_number(self):
+        data = {'target_number':  100}
+        network = self.generator.generate(criterion='counting', data=data)
+        self.assertTrue(network.num_frac == data['target_number'])
+
+    def test_generate_by_length(self):
+        data = {'target_length':  10}
+        network = self.generator.generate(criterion='length', data=data)
+        self.assertTrue(network.length().sum() >= data['target_length'])
+
+
+class TestDoublyConstrainedFractureGenerator(unittest.TestCase):
+
+    def setUp(self):
+        self.domain = {'xmin': 0, 'xmax': 10, 'ymin': 0, 'ymax': 10}
+
+    def generator(self, parent):
+        self.orientation = distributions.Uniform(np.pi/2)
+        self.length = distributions.Uniform(1)
+        generator = DoublyConstrainedChildrenGenerator(dist_length=self.length,
+                                                dist_orientation=self.orientation,
+                                                domain=self.domain,
+                                                parent=parent)
+        return generator
+
+    def test_no_pairs(self):
+        # Test identification of parallel fractures.
+        # Test should find no pairs
+        self.setUp()
+        p = np.array([[0, 1, 2, 3], [0, 0, 1, 1]])
+        e = np.array([[0, 2], [1, 3]])
+
+        network = pp.FractureNetwork2d(p, e, self.domain)
+        generator = self.generator(network)
+        pairs = generator.parent_pairs
+        self.assertTrue(len(pairs) == 0)
+        self.assertTrue(len(generator.interval_first) == 0)
+        self.assertTrue(len(generator.interval_second) == 0)
+
+    def test_one_pair(self):
+        # Test identification of parallel fractures.
+        # Test should find a single pair
+        self.setUp()
+        p = np.array([[0, 1, 0, 3], [0, 0, 1, 1]])
+        e = np.array([[0, 2], [1, 3]])
+
+        network = pp.FractureNetwork2d(p, e, self.domain)
+        generator = self.generator(network)
+        pairs = generator.parent_pairs
+        self.assertTrue(pairs.size == 2)
+        self.assertTrue(test_utils.compare_arrays(pairs, np.array([[0], [1]])))
+        i_first = generator.interval_first[(0, 1)][0]
+        self.assertTrue(test_utils.compare_arrays(i_first, np.array([[0, 1], [0, 0]])))
+        i_sec = generator.interval_second[(0, 1)][0]
+        self.assertTrue(test_utils.compare_arrays(i_sec, np.array([[0, 1], [1, 1]])))
+
+    def test_three_pairs(self):
+        # Test identification of parallel fractures.
+        # Test should find pairs between all fractures
+
+        self.setUp()
+        p = np.array([[0, 2, 1, 3, 0, 2], [0, 0, 1, 1, 2, 2]])
+        e = np.array([[0, 2, 4], [1, 3, 5]])
+
+        network = pp.FractureNetwork2d(p, e, self.domain)
+        generator = self.generator(network)
+        pairs = generator.parent_pairs
+        self.assertTrue(pairs.size == 6)
+        self.assertTrue(test_utils.compare_arrays(pairs, np.array([[0, 0, 1], [1, 2, 2]])))
+
+        i_first = generator.interval_first[(0, 2)][0]
+        self.assertTrue(test_utils.compare_arrays(i_first, np.array([[0, 1], [0, 0]])))
+        i_sec = generator.interval_second[(0, 2)][0]
+        self.assertTrue(test_utils.compare_arrays(i_sec, np.array([[0, 1], [2, 2]])))
+
+        i_first = generator.interval_first[(0, 1)][0]
+        self.assertTrue(test_utils.compare_arrays(i_first, np.array([[1, 2], [0, 0]])))
+        i_sec = generator.interval_second[(0, 1)][0]
+        self.assertTrue(test_utils.compare_arrays(i_sec, np.array([[1, 2], [1, 1]])))
+
+        i_first = generator.interval_first[(1, 2)][0]
+        self.assertTrue(test_utils.compare_arrays(i_first, np.array([[1, 2], [1, 1]])))
+        i_sec = generator.interval_second[(1, 2)][0]
+        self.assertTrue(test_utils.compare_arrays(i_sec, np.array([[1, 2], [2, 2]])))
+
+    def test_three_parents_four_pairs(self):
+        # Test identification of parallel fractures.
+        # The critical point is that two fractures meet in two intervals
+
+        self.setUp()
+        p = np.array([[0, 3, 1, 2, 0, 3], [0, 0, 1, 1, 2, 2]])
+        e = np.array([[0, 2, 4], [1, 3, 5]])
+
+        network = pp.FractureNetwork2d(p, e, self.domain)
+        generator = self.generator(network)
+        pairs = generator.parent_pairs
+        self.assertTrue(pairs.size == 6)
+        self.assertTrue(test_utils.compare_arrays(pairs, np.array([[0, 0, 1], [1, 2, 2]])))
+
+        i_first = generator.interval_first[(0, 2)][0]
+        self.assertTrue(test_utils.compare_arrays(i_first, np.array([[0, 1], [0, 0]])))
+        i_sec = generator.interval_second[(0, 2)][0]
+        self.assertTrue(test_utils.compare_arrays(i_sec, np.array([[0, 1], [2, 2]])))
+
+        i_first = generator.interval_first[(0, 2)][1]
+        self.assertTrue(test_utils.compare_arrays(i_first, np.array([[2, 3], [0, 0]])))
+        i_sec = generator.interval_second[(0, 2)][1]
+        self.assertTrue(test_utils.compare_arrays(i_sec, np.array([[2, 3], [2, 2]])))
+
+        i_first = generator.interval_first[(0, 1)][0]
+        self.assertTrue(test_utils.compare_arrays(i_first, np.array([[1, 2], [0, 0]])))
+        i_sec = generator.interval_second[(0, 1)][0]
+        self.assertTrue(test_utils.compare_arrays(i_sec, np.array([[1, 2], [1, 1]])))
+
+        i_first = generator.interval_first[(1, 2)][0]
+        self.assertTrue(test_utils.compare_arrays(i_first, np.array([[1, 2], [1, 1]])))
+        i_sec = generator.interval_second[(1, 2)][0]
+        self.assertTrue(test_utils.compare_arrays(i_sec, np.array([[1, 2], [2, 2]])))
+
+if __name__ == '__main__':
+    TestDoublyConstrainedFractureGenerator().test_three_parents_four_pairs()
+    unittest.main()
+
+"""
 class TestFractureSetGeneration(unittest.TestCase):
     def atest_set_distributions_run_population_single_family(self):
         # Define a small fracture set, set distributions, and use this to
@@ -51,8 +186,8 @@ class TestFractureSetGeneration(unittest.TestCase):
         self.assertTrue(np.allclose(realiz.edges, known_edges))
 
     def atest_draw_children_type(self):
-        """ Check that the children type is drawn correctly
-        """
+        # Check that the children type is drawn correctly
+
         p = np.array([[0, 5], [0, 0]])
         e = np.array([[0], [1]])
 
@@ -624,9 +759,11 @@ class TestParentChildrenRelations(unittest.TestCase):
         self.assertTrue(one_y["density"].size == 2)
         self.assertTrue(one_y["density"][0] * parent_length[0] == 1)
         self.assertTrue(one_y["density"][1] * parent_length[1] == 1)
+"""
 
-
+"""
 class TestDensityCounting(unittest.TestCase):
+    This class will essentially remain and be extended
     def test_1d_counting_single_box(self):
         domain = {"xmin": 0, "xmax": 1}
         p = np.array([0.4])
@@ -667,6 +804,7 @@ class TestDensityCounting(unittest.TestCase):
         self.assertTrue(f.domain_measure() == n.prod())
         self.assertTrue(f.domain_measure(domain) == n.prod())
 
+<<<<<<< 7130263f2a070ea037dd96a0fb154138cc012d36
 class TestFractureProlongationPruning(unittest.TestCase):
 
     def compare_points(self, a, b, tol=1e-4):
@@ -788,6 +926,9 @@ class TestDomainRestriction(unittest.TestCase):
         self.assertTrue(new_frac.pts.size == 0)
         self.assertTrue(new_frac.edges.size == 0)
 
+=======
+"""
+>>>>>>> Updates to stochastic fracture network generation
 
 class DummyDistribution:
     def __init__(self, value):
@@ -801,8 +942,7 @@ def make_dummy_distribution(value):
     return {"dist": DummyDistribution(value), "param": {}}
 
 
-if __name__ == '__main__':
-    unittest.main()
+
 # TestParentChildrenRelations().test_only_isolated_two_parents_one_far_away()
 #TestFractureSetGeneration().test_two_parents_one_far_away_all_both_y_children()
 #TestDensityCounting().test_measure_computation_2d()
