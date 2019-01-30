@@ -732,8 +732,10 @@ class ConstrainedChildrenGenerator(StochasticFractureGenerator):
 
 
 class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
-    def __init__(self, parent, side_distribution=None, **kwargs):
+    def __init__(self, parent, side_distribution=None, data=None, **kwargs):
         super(DoublyConstrainedChildrenGenerator, self).__init__(**kwargs)
+
+        self.search_direction = self._get_search_vector()
 
         self.parent = parent
 
@@ -751,10 +753,15 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
         fi = self.pairs[0, pi]
         si = self.pairs[1, pi]
 
+        dist, *rest = pp.cg.dist_two_segments(*self.parent.get_points(fi),
+                                              *self.parent.get_points(si))
+        if dist > np.min(self.parent.length()[[fi, si]]):
+            return np.zeros((2, 0))
+
         # Assign equal probability that the points are on each side of the parent
         side = self._generate_from_distribution(1, self.dist_side)
 
-        vec = self._get_search_vector()
+        vec = self.search_direction
 
         start = self.interval_points[pi][:, 0]
         end = self.interval_points[pi][:, 1]
@@ -797,47 +804,58 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
             self.interval_second = interval_second
             return
 
+        # Loop over all fractures
         for fi in range(self.parent.num_frac):
 
+            # Find all preliminary pairs where the current fracture is part
             hit_first = np.where(pair_array[0] == fi)[0]
             hit_second = np.where(pair_array[1] == fi)[0]
 
             start, end = self.parent.get_points(fi)
-            #            a = np.array([point_first[i] for i in hit_first]).squeeze().T
-            #            b = np.array([point_second[i] for i in hit_second]).squeeze().T
 
+            # Set up a point set along the fracture consistng of end points, togehter
+            # with all points where rays from other fractures hit.
+            # Together, these will form the boundaries of the intervals where the
+            # fracture has a certain neighbor (along the search vector)
             isect_pt = np.hstack(
                 (start, end, point_first[:, hit_first], point_second[:, hit_second])
             )
+            # Sort points along the fracture
             isect_pt, *rest = pp.utils.setmembership.unique_columns_tol(isect_pt)
             dist = np.sum((isect_pt - start) ** 2, axis=0)
-
             p = isect_pt[:, np.argsort(dist)]
 
+            # Storage of what is the current neighbor on the two sides of the fracture
             active_neigh_pos = None
             active_neigh_neg = None
 
-            vec = self._get_search_vector()
+            vec = self.search_direction
 
-            # Loop over intersection points
+            # Loop over intersection points. These all mark the start or end of a neighbor
+            # interval.
             for pi in range(p.shape[1]):
 
+                # Find neighbors of this point
                 neigh, second_neigh, pt_self, pt_first, pt_second, is_pos = self._find_neighbors(
                     vec, p[:, pi].reshape((-1, 1))
                 )
-                #              pdb.set_trace()
-
+                # Loop over the neighbors (can be on both sides)
                 for ni in range(len(neigh)):
+                    # Closest and second closest neighbor
                     loc_neigh = neigh[ni]
                     loc_second_neigh = second_neigh[ni]
+                    # Point on this fracture, on the closest fracture, and potentially
+                    # on the second closest (if there is one)
                     pself = pt_self[:, ni].reshape((-1, 1))
                     pf = pt_first[:, ni].reshape((-1, 1))
-                    if loc_second_neigh is not None:
+                    if loc_second_neigh is not None:  # None signifies there are no neighbors here
+                        # A bit of back and forth, depending on how many points there are
                         try:
                             psec = pt_second[:, ni].reshape((-1, 1))
                         except:
                             psec = pt_second[ni][0].reshape((-1, 1)).astype(np.float)
-                    #                n, pos, sn, pself, pf, psec in zip(neigh, is_pos, second_neigh, pt_self, pt_first, pt_second):
+
+                    # Check which side of the fracture we are on
                     if is_pos[ni]:
                         # Check if there currently is a neighbor on this side
                         if active_neigh_pos is None:
@@ -850,7 +868,6 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
 
                         else:
                             # We found (this fracture was hit by) the end of a neighbor.
-                            # TODO: Or the fracture itself ends
                             # The next neighbor is the second closest to the hit point in
                             # the direction of vec
                             if active_pos_pair in interval_second.keys():
@@ -862,7 +879,6 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
                                     np.hstack((pos_pt_self, pself))
                                 ]
 
-                            # pdb.set_trace()
                             if active_neigh_pos == loc_neigh:
                                 active_neigh_pos = loc_second_neigh
                                 if active_pos_pair in interval_second.keys():
@@ -895,7 +911,8 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
                                     pos_pt_other = psec
                                 active_pos_pair = (fi, active_neigh_pos)
                     else:
-                        # pdb.set_trace()
+                        # This is the other side of the fracture
+
                         # Check if there currently is a neighbor on this side
                         if active_neigh_neg is None:
                             # We have found the start of a new neighbor
@@ -952,10 +969,15 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
                                 active_neg_pair = (fi, active_neigh_neg)
 
         pairs = np.array([p for p in pairs]).T
+
+        # We have found pairs more than once: First by tracing rays from both pair
+        # members. Two fractures can also form multiple pairs (think long parallel
+        # fratures, with a smaller inbetween at the middle of the larger ones)
         del_ind = []
         for fi in range(pairs.shape[1]):
             f = pairs[0, fi]
             s = pairs[1, fi]
+            # Find other pairs of the same fracture
             other = np.where(
                 np.logical_or(
                     np.logical_and(pairs[0] == f, pairs[1] == s),
@@ -975,7 +997,7 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
 
         del_ind = np.unique(np.asarray(del_ind))
         pairs = np.delete(pairs, del_ind, axis=1)
-        #        pdb.set_trace()
+
         self.parent_pairs = pairs
         self.interval_first = interval_first
         self.interval_second = interval_second
@@ -1099,7 +1121,7 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
         point_second = np.zeros((2, 0))
 
         # Search direction, use the same for all fractures
-        vec = self._get_search_vector()
+        vec = self.search_direction
 
         # Loop over all fractures, look for pairs that involves this fracture.
         # We may find the same pair twice, once for each member of the pair.
