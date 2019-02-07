@@ -24,13 +24,16 @@ def permeability_upscaling(
     for di, direct in enumerate(directions):
 
         tic = time.time()
-        gb = network.mesh(network.tol, mesh_args)
+
+        gb = network.mesh(tol=network.tol, mesh_args=mesh_args)
         toc = time.time()
         if di == 0:
             sim_info['num_cells_2d'] = gb.grids_of_dimension(2)[0].num_cells
             sim_info['time_for_meshing'] = toc - tic
 
         gb = _setup_simulation_flow(gb, data, direct)
+        print(gb)
+        return upscaled_perm, sim_info
 
         pressure_kw = "flow"
 
@@ -38,7 +41,7 @@ def permeability_upscaling(
         for g, d in gb:
             d[pp.PRIMARY_VARIABLES] = {"pressure": {"cells": 1}}
             d[pp.DISCRETIZATION] = {"pressure": {"diffusive": mpfa}}
-        coupler = pp.RobinCoupling("flow", mpfa)
+        coupler = pp.RobinCoupling(pressure_kw, mpfa)
         for e, d in gb.edges():
             g1, g2 = gb.nodes_of_edge(e)
             d[pp.PRIMARY_VARIABLES] = {"pressure": {"cells": 1}}
@@ -74,10 +77,10 @@ def permeability_upscaling(
             inlet = d.get("inlet_faces", None)
             if inlet is None or inlet.size == 0:
                 continue
-            flux = d[pp.DISCRETIZATION_MATRICES][key]["flux"] * d["pressure"]
+            flux = d[pp.DISCRETIZATION_MATRICES][pressure_kw]["flux"] * d["pressure"]
             flux += (
-                d[pp.DISCRETIZATION_MATRICES][key]["bound_flux"]
-                * d["parameters"][key]["bc_values"]
+                d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_flux"]
+                * d["parameters"][pressure_kw]["bc_values"]
             )
             tot_inlet_flux += flux[inlet].sum()
 
@@ -167,7 +170,7 @@ def _setup_simulation_flow(gb, data, direction):
 
             d["inlet_faces"] = bound_faces[hit_in]
 
-        pp.initialize_data(d, g, "flow", specified_parameters)
+        pp.initialize_default_data(g, d, "flow", specified_parameters)
 
     for e, d in gb.edges():
         gl, _ = gb.nodes_of_edge(e)
