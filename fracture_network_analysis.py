@@ -7,8 +7,10 @@ only.
 import numpy as np
 import networkx as nx
 import time
+import scipy.sparse.linalg as spla
 
 import porepy as pp
+import pdb
 from examples.papers.flow_upscaling import segment_pixelation
 
 
@@ -28,28 +30,28 @@ def permeability_upscaling(
         gb = network.mesh(tol=network.tol, mesh_args=mesh_args)
         toc = time.time()
         if di == 0:
-            sim_info['num_cells_2d'] = gb.grids_of_dimension(2)[0].num_cells
-            sim_info['time_for_meshing'] = toc - tic
+            sim_info["num_cells_2d"] = gb.grids_of_dimension(2)[0].num_cells
+            sim_info["time_for_meshing"] = toc - tic
 
         gb = _setup_simulation_flow(gb, data, direct)
-        print(gb)
-        return upscaled_perm, sim_info
 
         pressure_kw = "flow"
 
-        mpfa = pp.Tpfa(pressure_kw)
+        mpfa = pp.Mpfa(pressure_kw)
         for g, d in gb:
             d[pp.PRIMARY_VARIABLES] = {"pressure": {"cells": 1}}
             d[pp.DISCRETIZATION] = {"pressure": {"diffusive": mpfa}}
+
+
         coupler = pp.RobinCoupling(pressure_kw, mpfa)
         for e, d in gb.edges():
             g1, g2 = gb.nodes_of_edge(e)
-            d[pp.PRIMARY_VARIABLES] = {"pressure": {"cells": 1}}
+            d[pp.PRIMARY_VARIABLES] = {"mortar_darcy_flux": {"cells": 1}}
             d[pp.COUPLING_DISCRETIZATION] = {
                 "lambda": {
                     g1: ("pressure", "diffusive"),
                     g2: ("pressure", "diffusive"),
-                    e: ("pressure", coupler),
+                    e: ("mortar_darcy_flux", coupler),
                 }
             }
 
@@ -60,12 +62,12 @@ def permeability_upscaling(
         A, b, block_dof, full_dof = assembler.assemble_matrix_rhs(gb)
         if di == 0:
             toc = time.time()
-            sim_info['Time_for_assembly'] = toc - tic
+            sim_info["Time_for_assembly"] = toc - tic
         tic = time.time()
-        p = np.linalg.solve(A.A, b)
+        p = spla.spsolve(A, b)
         if di == 0:
             toc = time.time()
-            sim_info['Time_for_pressure_solve'] = toc - tic
+            sim_info["Time_for_pressure_solve"] = toc - tic
 
         assembler.distribute_variable(gb, p, block_dof, full_dof)
 
@@ -84,50 +86,134 @@ def permeability_upscaling(
             )
             tot_inlet_flux += flux[inlet].sum()
 
-            pressure_cell = d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_pressure_cell"] * d["pressure"]
+            pressure_cell = (
+                d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_pressure_cell"]
+                * d["pressure"]
+            )
             pressure_flux = (
                 d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_pressure_face"]
                 * d["parameters"][pressure_kw]["bc_values"]
             )
             inlet_pressure = pressure_cell[inlet] + pressure_flux[inlet]
-            aperture = d[pp.PARAMETERS][pressure_kw]['aperture'][0]
+            aperture = d[pp.PARAMETERS][pressure_kw]["aperture"][0]
             tot_pressure += np.sum(inlet_pressure * g.face_areas[inlet] * aperture)
             tot_area += g.face_areas[inlet].sum() * aperture
             if g.dim == gb.dim_max():
                 # Extension of the domain in the active direction
                 dx = g.nodes[direct].max() - g.nodes[direct].min()
-                cross_sectional_area = (g.nodes[:g.dim].max(axis=1) - g.nodes[:g.dim].min(axis=1)).prod() / dx
-                import pdb
-                #pdb.set_trace()
+                cross_sectional_area = (
+                    g.nodes[: g.dim].max(axis=1) - g.nodes[: g.dim].min(axis=1)
+                ).prod() / dx
+
+
         mean_pressure = tot_pressure / tot_area
         upscaled_perm[di] = tot_inlet_flux * dx / (mean_pressure * cross_sectional_area)
         # End of post processing for permeability upscaling
-
         if tracer_transport:
+
+            _setup_simulation_tracer(gb, data, direct)
+
             tracer_variable = "temperature"
 
             temperature_kw = "transport"
+            mortar_variable = "lambda_adv"
+
 
             # Identifier of the two terms of the equation
             adv = "advection"
 
+            advection_term = "advection"
+            mass_term = "mass"
+            advection_coupling_term = "advection_coupling"
+
             adv_discr = pp.Upwind(temperature_kw)
 
             adv_coupling = pp.UpwindCoupling(temperature_kw)
+
+            mass_discretization = pp.MassMatrix(temperature_kw)
+
             for g, d in gb:
                 d[pp.PRIMARY_VARIABLES] = {tracer_variable: {"cells": 1}}
-                d[pp.DISCRETIZATION] = {tracer_variable: {adv: adv_discr}}
+                d[pp.DISCRETIZATION] = {
+                    tracer_variable: {
+                        advection_term: adv_discr,
+                        mass_term: mass_discretization,
+                    }
+                }
 
             for e, d in gb.edges():
                 g1, g2 = gb.nodes_of_edge(e)
-                d[pp.PRIMARY_VARIABLES] = {"lambda_adv": {"cells": 1}, "lambda_diff": {"cells": 1}}
+                d[pp.PRIMARY_VARIABLES] = {mortar_variable: {"cells": 1}}
                 d[pp.COUPLING_DISCRETIZATION] = {
-                    adv: {g1: (tracer_variable, adv), g2: (tracer_variable, adv), e: ("lambda_adv", adv_coupling)}
+                    advection_coupling_term: {
+                        g1: (tracer_variable, adv),
+                        g2: (tracer_variable, adv),
+                        e: (mortar_variable, adv_coupling),
+                    }
                 }
 
+            pp.fvutils.compute_darcy_flux(gb, keyword_store=temperature_kw ,
+                                          lam_name="mortar_darcy_flux")
 
-        import pdb
-        #pdb.set_trace()
+            A, b, block_dof, full_dof = assembler.assemble_matrix_rhs(
+                gb,
+                active_variables=[tracer_variable, mortar_variable],
+                add_matrices=False,
+            )
+
+            advection_coupling_term += (
+                "_" + mortar_variable + "_" + tracer_variable + "_" + tracer_variable
+            )
+
+            mass_term += "_" + tracer_variable
+            advection_term += "_" + tracer_variable
+
+            lhs = A[mass_term] + data["time_step"] * (
+                A[advection_term] + A[advection_coupling_term]
+            )
+            rhs_source_adv = data["time_step"] * (
+                b[advection_term] + b[advection_coupling_term]
+            )
+
+            IEsolver = spla.factorized(lhs)
+
+            save_every = 10
+            n_steps = int(np.round(data["t_max"] / data["time_step"]))
+
+            # Initial condition
+            tracer = np.zeros(rhs_source_adv.size)
+            assembler.distribute_variable(
+                gb,
+                tracer,
+                block_dof,
+                full_dof,
+                variable_names=[tracer_variable, mortar_variable],
+            )
+
+            # Exporter
+            exporter = pp.Exporter(gb, name=tracer_variable, folder="viz_tmp")
+            export_fields = [tracer_variable]
+
+            for i in range(n_steps):
+
+                if np.isclose(i % save_every, 0):
+                    # Export existing solution (final export is taken care of below)
+                    assembler.distribute_variable(
+                        gb,
+                        tracer,
+                        block_dof,
+                        full_dof,
+                        variable_names=[tracer_variable, mortar_variable],
+                    )
+                    exporter.write_vtk(export_fields, time_step=int(i // save_every))
+                tracer = IEsolver(A[mass_term] * tracer + rhs_source_adv)
+
+            exporter.write_vtk(export_fields, time_step=(n_steps // save_every))
+            time_steps = np.arange(
+                0, data["t_max"] + data["time_step"], save_every * data["time_step"]
+            )
+            exporter.write_pvd(time_steps)
+
 
     return upscaled_perm, sim_info
 
@@ -147,7 +233,7 @@ def _setup_simulation_flow(gb, data, direction):
         perm = pp.SecondOrderTensor(gb.dim_max(), kxx)
         a = data["aperture"]
         a = np.power(a, gb.dim_max() - g.dim) * np.ones(g.num_cells)
-        specified_parameters = {"aperture": a, "permeability": perm}
+        specified_parameters = {"aperture": a, "second_order_tensor": perm}
 
         bound_faces = g.tags["domain_boundary_faces"].nonzero()[0]
         if bound_faces.size > 0:
@@ -172,6 +258,10 @@ def _setup_simulation_flow(gb, data, direction):
 
         pp.initialize_default_data(g, d, "flow", specified_parameters)
 
+    g_2d = gb.grids_of_dimension(2)[0]
+    d_2d = gb.node_props(g_2d)
+    perm = d_2d[pp.PARAMETERS]['flow']['second_order_tensor']
+
     for e, d in gb.edges():
         gl, _ = gb.nodes_of_edge(e)
         dl = gb.node_props(gl)
@@ -183,33 +273,28 @@ def _setup_simulation_flow(gb, data, direction):
 
     return gb
 
-def _compute_flow_rate(self):
-    # this function is only for the first benchmark case
-    for g, d in self.gb:
-        if g.dim < 3:
-            continue
-        faces, cells, sign = sps.find(g.cell_faces)
-        index = np.argsort(cells)
-        faces, sign = faces[index], sign[index]
-
-        discharge = d["discharge"].copy()
-        discharge[faces] *= sign
-        discharge[g.get_internal_faces()] = 0
-        discharge[discharge < 0] = 0
-        val = np.dot(discharge, np.abs(g.cell_faces) * self.p[: g.num_cells])
-        self.outflow = np.r_[self.outflow, val]
 
 def _setup_simulation_tracer(gb, data, direction):
     min_coord = gb.bounding_box()[0][direction]
     max_coord = gb.bounding_box()[1][direction]
 
+    parameter_keyword = "transport"
+
     for g, d in gb:
         param = d[pp.PARAMETERS]
         transport_parameter_dictionary = {}
-        param.update_dictionaries("transport", transport_parameter_dictionary)
-        param.set_from_other("transport", "flow", ["aperture"])
-        d[pp.DISCRETIZATION_MATRICES]["transport"] = {}
+        param.update_dictionaries(parameter_keyword, transport_parameter_dictionary)
+        param.set_from_other(parameter_keyword, "flow", ["aperture"])
+        d[pp.DISCRETIZATION_MATRICES][parameter_keyword] = {}
 
+        unity = np.ones(g.num_cells)
+
+        if g.dim == gb.dim_max():
+            porosity = 0.2 * unity
+        else:
+            porosity = 0.8 * unity
+
+        specified_parameters = {"mass_weight": porosity,}
 
         bound_faces = g.tags["domain_boundary_faces"].nonzero()[0]
         if bound_faces.size > 0:
@@ -221,25 +306,25 @@ def _setup_simulation_tracer(gb, data, direction):
             )[0]
             bound_type = np.array(["neu"] * bound_faces.size)
             bound_type[hit_out] = "dir"
-            bound_type[hit_in] = "neu"
+            bound_type[hit_in] = "dir"
             bound = pp.BoundaryCondition(g, bound_faces.ravel("F"), bound_type)
             bc_val = np.zeros(g.num_faces)
-            bc_val[bound_faces] = 0
-            influx = g.face_areas[bound_faces[hit_in]]
-            bc_val[bound_faces[hit_in]] = influx
+            bc_val[bound_faces[hit_out]] = 0
+            bc_val[bound_faces[hit_in]] = 1
 
             specified_parameters.update({"bc": bound, "bc_values": bc_val})
 
             d["inlet_faces"] = bound_faces[hit_in]
+        else:
+            bc = pp.BoundaryCondition(g)
+            specified_parameters.update({"bc": bc, "bc_values": np.zeros(g.num_faces)})
 
-        pp.initialize_data(d, g, "flow", specified_parameters)
+        pp.initialize_data(g, d, parameter_keyword, specified_parameters)
 
     for e, d in gb.edges():
-        gl, _ = gb.nodes_of_edge(e)
-        mg = d["mortar_grid"]
-        kn = data["fracture_perm"]
-        d[pp.PARAMETERS] = pp.Parameters(mg, ["flow"], [{"normal_diffusivity": kn}])
-        d[pp.DISCRETIZATION_MATRICES] = {"flow": {}}
+
+        d[pp.PARAMETERS].update_dictionaries(parameter_keyword, {})
+        d[pp.DISCRETIZATION_MATRICES][parameter_keyword] = {}
 
     return gb
 
@@ -255,7 +340,7 @@ def connectivity_field(network, num_boxes):
         by Alghalandis et al. Mathematical Geosciences 2015.
 
     Parameters:
-        network (FractureSet): fracture network to be analyzed
+        network (FractureNetwork2d): fracture network to be analyzed
         num_boxes (np.array, size 2): Number of bins to split the domain into in
             the x and y-direction, respectively.
 
@@ -357,24 +442,28 @@ def compute_topology(networks):
 
     # Storage arrays
     num_i, num_y, num_x = [], [], []
-    num_i_i, num_i_c, num_c_c = [], [] ,[]
+    num_i_i, num_i_c, num_c_c = [], [], []
 
     # Loop over all networks, first compute node topology, then branches
     for n in networks:
         node_types = analyze_intersections_of_sets(n, tol=n.tol)
-        i = node_types['i_nodes']
-        y = node_types['y_nodes']
-        x = node_types['x_nodes']
+        i = node_types["i_nodes"]
+        y = node_types["y_nodes"]
+        x = node_types["x_nodes"]
 
         # Count nodes on the domain boundary - these will be subtracted from
         # the i-nodes
         p = n.pts
         d = n.domain
         tol = n.tol
-        num_bound = np.logical_and.reduce((np.abs(p[0] - d['xmin']) < tol,
-                                           np.abs(p[0] - d['xmax']) < tol,
-                                           np.abs(p[1] - d['ymin']) < tol,
-                                           np.abs(p[1] - d['ymax']) < tol)).sum()
+        num_bound = np.logical_and.reduce(
+            (
+                np.abs(p[0] - d["xmin"]) < tol,
+                np.abs(p[0] - d["xmax"]) < tol,
+                np.abs(p[1] - d["ymin"]) < tol,
+                np.abs(p[1] - d["ymax"]) < tol,
+            )
+        ).sum()
         # Store information
         num_i.append((i.sum() - num_bound).astype(np.int))
         num_y.append(y.sum().astype(np.int))
@@ -384,15 +473,18 @@ def compute_topology(networks):
         # Find the number of T-intersections that ends in each fracture.
         # This is different from the field y_nodes, which considers endpoints
         # of the fracture itself.
-        a = node_types['arrests']
+        a = node_types["arrests"]
         # Isolated branches have two i-nodes, no other nodes
-        ii = np.logical_and.reduce((i == 2, y == 0, x == 0, a == 0)).sum().astype(np.int)
+        ii = (
+            np.logical_and.reduce((i == 2, y == 0, x == 0, a == 0)).sum().astype(np.int)
+        )
         # ic branches either have one i-node and one y-node (the end point of
         # the fracture must be etiher i or y - x and a cannot be the end),
         # Or two i-nodes together with at least one cross. In the latter case
         # there will be two ic-branches
-        ic = np.logical_and.reduce((i == 1, y == 1, x == 0, a == 0)).sum().astype(np.int) \
-            + 2 * np.logical_and(i == 2, x + a > 0 ).sum().astype(np.int)
+        ic = np.logical_and.reduce((i == 1, y == 1, x == 0, a == 0)).sum().astype(
+            np.int
+        ) + 2 * np.logical_and(i == 2, x + a > 0).sum().astype(np.int)
         # CC-branches are formed between y, x and a-nodes. Their number on
         # each fracture will be the number of such nodes minus one.
         cc = np.maximum(y + x + a - 1, 0).sum()
@@ -401,8 +493,8 @@ def compute_topology(networks):
         num_i_c.append(ic)
         num_c_c.append(cc)
 
-    node_topology = {'i': num_i, 'y': num_y, 'x': num_x}
-    branch_topology = {'ii': num_i_i, 'ic': num_i_c, 'cc': num_c_c}
+    node_topology = {"i": num_i, "y": num_y, "x": num_x}
+    branch_topology = {"ii": num_i_i, "ic": num_i_c, "cc": num_c_c}
     return node_topology, branch_topology
 
 
