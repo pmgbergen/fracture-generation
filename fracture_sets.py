@@ -11,8 +11,7 @@ import scipy.stats as stats
 import logging
 import pdb
 
-from examples.papers.flow_upscaling import fracture_network_analysis
-from examples.papers.stochastic_topology import distributions
+from fracture_generation import fracture_network_analysis, distributions
 import porepy as pp
 
 
