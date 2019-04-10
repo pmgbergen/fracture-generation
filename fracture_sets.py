@@ -11,7 +11,7 @@ import scipy.stats as stats
 import logging
 import pdb
 
-from fracture_generation import fracture_network_analysis, distributions
+import fracture_network_analysis, distributions
 import porepy as pp
 
 
