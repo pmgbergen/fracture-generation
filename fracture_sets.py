@@ -468,7 +468,7 @@ class StochasticFractureGenerator(object):
         allowed_dist = data.get("minimum_fracture_spacing", 0)
         return dist.min() < allowed_dist
 
-    def _generate_by_intensity(self, domain):
+    def _generate_by_intensity(self, domain=None):
         """ Generate a realization of a fracture network from the statistical distributions
         represented in this object.
 
