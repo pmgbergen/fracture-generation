@@ -1,15 +1,14 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-Created on Mon Sep 24 12:54:36 2018
+This module contains classes and methods aimed at generation of stochastic fracture
+networks, accounting for the topology of the fracture network intersections.
 
-@author: Eirik Keilegavlens
+The module is implemented as an extension of PorePy, which should be available on
+the system to run the simulation.
 """
 import numpy as np
 import scipy
 import scipy.stats as stats
 import logging
-import pdb
 
 from fracture_generation import fracture_network_analysis, distributions
 import porepy as pp
@@ -19,7 +18,50 @@ logger = logging.getLogger(__name__)
 
 
 class StochasticFractureNetwork2d(pp.FractureNetwork2d):
+    """ Mother class for the stochastic fracture network generators.
+
+    The class is implemented as an extension of the standard class for representation of
+    2d fracture networks in PorePy.
+
+    The main intended usage is to fit statistical distributions to the fractures,
+    and use this to generate realizations based on this statistics. The statistical
+    properties of the fracture set is characterized in terms of fracture position,
+    length and angle.
+
+    It is assumed that the fractures can meaningfully be represented by a single
+    statistical distribution. To achieve this, it may be necessary to divide a
+    fracture network into several sets, and fit them separately. As an example,
+    a network where the fractures have one out of two orientations which are orthogonal
+    to each other will not be meaningfully be represented as a single set.
+
+    Attributes:
+        pts (np.array, 2 x num_pts): Start and endpoints of the fractures. Points
+            can be shared by fractures.
+        edges (np.array, (2 + num_tags) x num_fracs): The first two rows represent
+            indices, refering to pts, of the start and end points of the fractures.
+            Additional rows are optional tags of the fractures.
+        domain (dictionary): The domain in which the fracture set is defined.
+            Should contain keys 'xmin', 'xmax', 'ymin', 'ymax', each of which
+            maps to a double giving the range of the domain. The fractures need
+            not lay inside the domain.
+        num_frac (int): Number of fractures in the domain.
+
+    """
+
     def __init__(self, pts=None, edges=None, domain=None, network=None, tol=1e-8):
+        """ Define the frature set.
+
+        Parameters:
+            pts (np.array, 2 x n): Start and endpoints of the fractures. Points
+            can be shared by fractures.
+        edges (np.array, (2 + num_tags) x num_fracs): The first two rows represent
+            indices, refering to pts, of the start and end points of the fractures.
+            Additional rows are optional tags of the fractures.
+        domain (dictionary): The domain in which the fracture set is defined.
+            Should contain keys 'xmin', 'xmax', 'ymin', 'ymax', each of which
+            maps to a double giving the range of the domain.
+
+        """
         if network is not None:
             pts = network.pts
             edges = network.edges
@@ -40,15 +82,24 @@ class StochasticFractureNetwork2d(pp.FractureNetwork2d):
             self.branches[fi] = self.pts[:, self.edges[:2, fi]]
 
     def add_fracture(self, p0, p1, tag=None):
+        """ Add a fracture to the network.
+
+        Parameters:
+            p0 (np.arary, 2 x 1): Start point of the fracture.
+            p1 (np.arary, 2 x 1): End point of the fracture.
+
+        """
 
         num_pts = self.pts.shape[1]
-
+        # Add points to the end of the point array
         pt_arr = np.hstack((p0.reshape((-1, 1)), p1.reshape((-1, 1))))
         self.pts = np.hstack((self.pts, pt_arr))
+        # Define the new connection between points.
         e = np.array([[num_pts], [num_pts + 1], [tag]], dtype=np.int)
         self.edges = np.hstack((self.edges, e))
-
+        # Append a branch
         self.branches.append(pt_arr)
+        # Increase the number of fractures.
         self.num_frac += 1
 
     def _sort_branch_points(self, fi, p):
@@ -75,6 +126,25 @@ class StochasticFractureNetwork2d(pp.FractureNetwork2d):
         return np.atleast_2d(lengths)
 
     def constrain_to_domain(self, domain=None):
+        """ Constrain the fracture network to lay within a specified domain.
+
+        Fractures that cross the boundary of the domain will be cut to lay
+        within the boundary. Fractures that lay completely outside the domain
+        will be dropped from the constrained description.
+
+        TODO: Also return an index map from new to old fractures.
+
+        Parameters:
+            domain (dictionary, None): Domain specification, in the form of a
+                dictionary with fields 'xmin', 'xmax', 'ymin', 'ymax'. If not
+                provided, the domain of this object will be used.
+
+        Returns:
+            StochasticFractureNetwork2d: Initialized by the constrained fractures, and the
+                specified domain.
+
+        """
+
         network = super(StochasticFractureNetwork2d, self).constrain_to_domain(domain)
         return StochasticFractureNetwork2d(network=network)
 
@@ -305,31 +375,6 @@ class StochasticFractureGenerator(object):
     def set_intensity_map(self, box):
         self.intensity = box
 
-    def _fracture_from_center_angle_length(self, p, angles, lengths):
-        """ Generate fractures from a marked-point representation.
-
-        Parameters:
-            p (np.array, 2 x num_frac): Center points of the fractures.
-            angles (np.array, num_frac): Angle from the x-axis of the fractures.
-                Measured in radians.
-            lengths (np.array, num_frac): Length of the fractures
-
-        Returns:
-            np.array (2 x 2 * num_frac): Start and endpoints of the fractures
-            np.array (2 x num_frac): For each fracture, the start and endpoint,
-                in terms of indices in the point array.
-
-        """
-        num_frac = lengths.size
-        # pdb.set_trace()
-
-        start = p + 0.5 * lengths * np.vstack((np.cos(angles), np.sin(angles)))
-        end = p - 0.5 * lengths * np.vstack((np.cos(angles), np.sin(angles)))
-
-        pts = np.hstack((start, end))
-
-        e = np.vstack((np.arange(num_frac), num_frac + np.arange(num_frac)))
-        return pts, e
 
     def domain_measure(self, domain=None):
         """ Get the measure (length, area) of a given box domain, specified by its
@@ -524,9 +569,31 @@ class StochasticFractureGenerator(object):
         return p, e
 
     def generate(self, criterion, data, return_network=True):
+        """ Generate a fracture network from a specified criterion.
+
+        The available criteria are:
+            'counting': Generate a fixed number of fractures.
+            'intensity': Generate according to the intensity map of this generator.
+            'length': Generate fractures until a target length for the total
+                generated length is reached.
+
+        Parameters:
+            criterion (str): Method used for generation.
+            data (dict): Various parameters needed for generation.
+            return_network (boolean, optional): If True (default), the generated
+                data is returned in the form of a fracture netowrk. If not, points
+                and edges are returned instead.
+
+        Returns:
+            Either a StochasticFractureNetwork2d (if return_network=True), or
+                points and edges of the generated network.
+
+        """
         if "domain" not in data.keys():
             data["domain"] = self.domain
+
         if criterion.lower().strip() == "counting":
+            # Generate a fixed number of fractures
             num_frac = 0
             p = np.zeros((2, 0))
             while num_frac < data["target_number"]:
@@ -542,12 +609,17 @@ class StochasticFractureGenerator(object):
             p, e = self._generate_by_intensity()
 
         elif criterion.lower().strip() == "length":
+            # Generate fractures until a given target length for the total fracture
+            # network is hit.
 
+            # Utility function
             def dist_points(a, b):
                 return np.sqrt(np.sum((a - b) ** 2))
 
             full_length = 0
             p = np.zeros((2, 0))
+            # Until the target length is reached, create new fractures, add them
+            # to the set (unless they are too close to existing fractures)
             while full_length < data["target_length"]:
                 loc_p = self._generate_single_fracture(data)
                 if not self._candidate_is_too_close(loc_p, p, data):
@@ -568,23 +640,58 @@ class StochasticFractureGenerator(object):
             return p, e.astype(np.int)
 
     def _generate_single_fracture(self, data):
+        """ Generate a single fracture, according to the statistics of this generator.
+
+        The fracture position is set according to the specified intensity map of
+        the generator - or placed in a random point if no intensity map is set.
+
+        """
+        # If no intensity map is set, use a single box for the entire domain
         if self.intensity is None:
             self.intensity = np.array([[10 / self.domain_measure()]])
 
+        # Generate center point for the fracture
+        # The while loop goes on until at least one center point is created.
         while True:
             cp_tmp = self._generate_centers(center_mode="poisson", data=data)
             if cp_tmp.size > 0:
                 break
 
         # If the intensity map has several blocks, there will be a spatial
-        # ordering associated with cp. Shuffle the
+        # ordering associated with cp. Since we want a single fracture, we randomly
+        # shuffle the center point coordinates.
         shuffle_ind = np.argsort(np.random.rand(cp_tmp.shape[-1]))
-        #   pdb.set_trace()
         cp = cp_tmp[:, shuffle_ind][:, 0].reshape((-1, 1))
-
+        # Set orientation and length according to the set distributions
         orientation = self._generate_from_distribution(1, self.dist_orientation)
         lengths = self._generate_from_distribution(1, self.dist_length)
         return self._fracture_from_center_angle_length(cp, orientation, lengths)[0]
+
+    def _fracture_from_center_angle_length(self, p, angles, lengths):
+        """ Generate fractures from a marked-point representation.
+
+        Parameters:
+            p (np.array, 2 x num_frac): Center points of the fractures.
+            angles (np.array, num_frac): Angle from the x-axis of the fractures.
+                Measured in radians.
+            lengths (np.array, num_frac): Length of the fractures
+
+        Returns:
+            np.array (2 x 2 * num_frac): Start and endpoints of the fractures
+            np.array (2 x num_frac): For each fracture, the start and endpoint,
+                in terms of indices in the point array.
+
+        """
+        num_frac = lengths.size
+        # pdb.set_trace()
+
+        start = p + 0.5 * lengths * np.vstack((np.cos(angles), np.sin(angles)))
+        end = p - 0.5 * lengths * np.vstack((np.cos(angles), np.sin(angles)))
+
+        pts = np.hstack((start, end))
+
+        e = np.vstack((np.arange(num_frac), num_frac + np.arange(num_frac)))
+        return pts, e
 
     def _generate_centers(self, center_mode, data):
         domain = data.get("domain")
