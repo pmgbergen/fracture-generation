@@ -46,7 +46,7 @@ def permeability_upscaling(
         tic = time.time()
 
         gb = network.mesh(tol=network.tol, mesh_args=mesh_args)
-        print(gb)
+
         toc = time.time()
         if di == 0:
             sim_info["num_cells_2d"] = gb.grids_of_dimension(2)[0].num_cells
@@ -117,7 +117,7 @@ def permeability_upscaling(
                     flux += bound_flux_discr * mg.mortar_to_master_int() * d_e[pp.STATE]["mortar_darcy_flux"]
 
             # Add contribution to total inlet flux
-            tot_inlet_flux += flux[inlet].sum()
+            tot_inlet_flux += np.abs(flux[inlet]).sum()
 
             # Next, find the pressure at the inlet faces
             # The pressure is calculated as the values in the neighboring cells,
@@ -148,7 +148,7 @@ def permeability_upscaling(
         mean_pressure = tot_pressure / tot_area
 
         # The upscaled permeability
-        upscaled_perm[di] = -(tot_inlet_flux / tot_area) * dx / mean_pressure
+        upscaled_perm[di] = (tot_inlet_flux / tot_area) * dx / mean_pressure
         # End of post processing for permeability upscaling
 
         if tracer_transport:
@@ -276,7 +276,7 @@ def _setup_simulation_flow(gb, data, direction):
 
         a = data["aperture"]
         a = np.power(a, gb.dim_max() - g.dim) * np.ones(g.num_cells)
-        perm = pp.SecondOrderTensor(kxx * a)
+        perm = pp.SecondOrderTensor(kxx)
 
         specified_parameters = {"second_order_tensor": perm, "aperture": a}
 
@@ -292,6 +292,7 @@ def _setup_simulation_flow(gb, data, direction):
             # Dirichlet conditions on outlets only
             bound_type = np.array(["neu"] * bound_faces.size)
             bound_type[hit_out] = "dir"
+            bound_type[hit_in] = "dir"
 
             bound = pp.BoundaryCondition(g, bound_faces.ravel("F"), bound_type)
 
@@ -302,7 +303,7 @@ def _setup_simulation_flow(gb, data, direction):
             # Use aperture scaling for lower-dimensional faces; for max_dim
             # the aperture is set to 1.
             influx = g.face_areas[bound_faces[hit_in]] * a[0]
-            bc_val[bound_faces[hit_in]] = -influx
+            bc_val[bound_faces[hit_in]] = 1#-influx
             specified_parameters.update({"bc": bound, "bc_values": bc_val})
 
             # Store the inlet faces
