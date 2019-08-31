@@ -17,6 +17,24 @@ from fracture_generation import segment_pixelation
 def permeability_upscaling(
     network, data, mesh_args, directions, do_viz=True, tracer_transport=False
 ):
+    """ Compute bulk permeabilities for a 2d domain with a fracture network.
+
+    The function sets up a flow field in the specified directions, and calculates
+    an upscaled permeability of corresponding to the calculated flow configuration.
+
+    Parameters:
+        network (pp.FractureNetwork2d): Network, with domain.
+        data (dictionary): Data to be specified.
+        mesh_args (dictionray): Parameters for meshing. See FractureNetwork2d.mesh()
+            for details.
+        directions (np.array): Directions to upscale permeabilities.
+            Indicated by 0 (x-direction) and or 1 (y-direction).
+
+    Returns:
+        np.array, dim directions.size: Upscaled permeability in each of the directions.
+        sim_info: Various information on the time spent on this simulation.
+
+    """
 
     directions = np.asarray(directions)
     upscaled_perm = np.zeros(directions.size)
@@ -28,6 +46,7 @@ def permeability_upscaling(
         tic = time.time()
 
         gb = network.mesh(tol=network.tol, mesh_args=mesh_args)
+        print(gb)
         toc = time.time()
         if di == 0:
             sim_info["num_cells_2d"] = gb.grids_of_dimension(2)[0].num_cells
@@ -76,16 +95,33 @@ def permeability_upscaling(
         tot_area = 0
         tot_inlet_flux = 0
         for g, d in gb:
+            # Inlet faces of this grid
             inlet = d.get("inlet_faces", None)
+            # If no inlet, no need to do anything
             if inlet is None or inlet.size == 0:
                 continue
+
+            # Compute flux field in the grid
+            # Internal flux
             flux = d[pp.DISCRETIZATION_MATRICES][pressure_kw]["flux"] * d[pp.STATE]["pressure"]
+            # Contribution from the boundary
+            bound_flux_discr = d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_flux"]
             flux += (
-                d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_flux"]
+                bound_flux_discr
                 * d["parameters"][pressure_kw]["bc_values"]
             )
+            # Add contribution from all neighboring lower-dimensional interfaces
+            for e, d_e in gb.edges_of_node(g):
+                mg = d_e["mortar_grid"]
+                if mg.dim == g.dim -1:
+                    flux += bound_flux_discr * mg.mortar_to_master_int() * d_e[pp.STATE]["mortar_darcy_flux"]
+
+            # Add contribution to total inlet flux
             tot_inlet_flux += flux[inlet].sum()
 
+            # Next, find the pressure at the inlet faces
+            # The pressure is calculated as the values in the neighboring cells,
+            # plus an offset from the incell-variations
             pressure_cell = (
                 d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_pressure_cell"]
                 * d[pp.STATE]["pressure"]
@@ -95,20 +131,26 @@ def permeability_upscaling(
                 * d["parameters"][pressure_kw]["bc_values"]
             )
             inlet_pressure = pressure_cell[inlet] + pressure_flux[inlet]
+            # Scale the pressure at the face with the face length.
+            # Also include an aperture scaling here: For the highest dimensional grid, this
+            # will be as scaling with 1.
             aperture = d[pp.PARAMETERS][pressure_kw]["aperture"][0]
             tot_pressure += np.sum(inlet_pressure * g.face_areas[inlet] * aperture)
+            # Add to the toal outlet area
             tot_area += g.face_areas[inlet].sum() * aperture
+            # Also compute the cross sectional area of the domain
             if g.dim == gb.dim_max():
                 # Extension of the domain in the active direction
                 dx = g.nodes[direct].max() - g.nodes[direct].min()
-                cross_sectional_area = (
-                    g.nodes[: g.dim].max(axis=1) - g.nodes[: g.dim].min(axis=1)
-                ).prod() / dx
 
-
+        # Mean pressure at the inlet, which will also be mean pressure difference
+        # over the domain
         mean_pressure = tot_pressure / tot_area
-        upscaled_perm[di] = tot_inlet_flux * dx / (mean_pressure * cross_sectional_area)
+
+        # The upscaled permeability
+        upscaled_perm[di] = -(tot_inlet_flux / tot_area) * dx / mean_pressure
         # End of post processing for permeability upscaling
+
         if tracer_transport:
 
             _setup_simulation_tracer(gb, data, direct)
@@ -223,6 +265,8 @@ def _setup_simulation_flow(gb, data, direction):
     min_coord = gb.bounding_box()[0][direction]
     max_coord = gb.bounding_box()[1][direction]
 
+    dx = max_coord - min_coord
+
     for g, d in gb:
 
         if g.dim == gb.dim_max():
@@ -238,23 +282,30 @@ def _setup_simulation_flow(gb, data, direction):
 
         bound_faces = g.tags["domain_boundary_faces"].nonzero()[0]
         if bound_faces.size > 0:
+            # Outflow faces
             hit_out = np.where(
-                np.abs(g.face_centers[direction, bound_faces] - max_coord) < 1e-8
+                np.abs(g.face_centers[direction, bound_faces] - max_coord) < 1e-8 * dx
             )[0]
             hit_in = np.where(
-                np.abs(g.face_centers[direction, bound_faces] - min_coord) < 1e-8
+                np.abs(g.face_centers[direction, bound_faces] - min_coord) < 1e-8 * dx
             )[0]
+            # Dirichlet conditions on outlets only
             bound_type = np.array(["neu"] * bound_faces.size)
             bound_type[hit_out] = "dir"
 
-            bound_type[hit_in] = "neu"
             bound = pp.BoundaryCondition(g, bound_faces.ravel("F"), bound_type)
+
+            # Default is homogeneous conditions on all boundary faces
             bc_val = np.zeros(g.num_faces)
             bc_val[bound_faces] = 0
+            # The influx is proportional to the
+            # Use aperture scaling for lower-dimensional faces; for max_dim
+            # the aperture is set to 1.
             influx = g.face_areas[bound_faces[hit_in]] * a[0]
             bc_val[bound_faces[hit_in]] = -influx
             specified_parameters.update({"bc": bound, "bc_values": bc_val})
 
+            # Store the inlet faces
             d["inlet_faces"] = bound_faces[hit_in]
 
         pp.initialize_default_data(g, d, "flow", specified_parameters)
