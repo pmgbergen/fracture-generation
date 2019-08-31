@@ -461,7 +461,7 @@ class StochasticFractureGenerator(object):
         start_set = p[:, ::2]
         end_set = p[:, 1::2]
 
-        dist, *rest = pp.cg.dist_segment_segment_set(
+        dist, *rest = pp.distances.segment_segment_set(
             p_new[:, 0], p_new[:, 1], start_set, end_set
         )
 
@@ -752,7 +752,7 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
         fi = self.pairs[0, pi]
         si = self.pairs[1, pi]
 
-        dist, *rest = pp.cg.dist_two_segments(*self.parent.get_points(fi),
+        dist, *rest = pp.distances.two_segments(*self.parent.get_points(fi),
                                               *self.parent.get_points(si))
         if dist > np.min(self.parent.length()[[fi, si]]):
             return np.zeros((2, 0))
@@ -1204,7 +1204,7 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
             s = offshots_start[:, oi].reshape((-1, 1))
             e = offshots_end[:, oi].reshape((-1, 1))
             # Compute distance between this point and all other segments in the network
-            d, cp, cg_seg = pp.cg.dist_segment_segment_set(
+            d, cp, cg_seg = pp.distances.segment_segment_set(
                 s, e, start_parent, end_parent
             )
             # Count hits, where the distance is very small
@@ -1388,7 +1388,7 @@ class IsolatedFractureChildernGenerator(FractureChildrenGenerator):
         center_of_isolated = 0.5 * (
             self.pts[:, self.edges[0, isolated]] + self.pts[:, self.edges[1, isolated]]
         )
-        dist_isolated, closest_pt_isolated = pp.cg.dist_points_segments(
+        dist_isolated, closest_pt_isolated = pp.distances.points_segments(
             center_of_isolated, start_parent, end_parent
         )
 
@@ -1784,7 +1784,7 @@ class ChildFractureSet(FractureChildrenGenerator):
         for ci in range(num_children):
             start = p[:, edges[0, ci]].reshape((-1, 1))
             end = p[:, edges[1, ci]].reshape((-1, 1))
-            d, cp, cg_seg = pp.cg.dist_segment_segment_set(
+            d, cp, cg_seg = pp.distances.segment_segment_set(
                 start, end, start_parent, end_parent
             )
 
@@ -1880,7 +1880,7 @@ class ChildFractureSet(FractureChildrenGenerator):
                 s = offshots_start[:, oi].reshape((-1, 1))
                 e = offshots_end[:, oi].reshape((-1, 1))
                 # Compute distance between this point and all other segments in the network
-                d, cp, cg_seg = pp.cg.dist_segment_segment_set(
+                d, cp, cg_seg = pp.distances.segment_segment_set(
                     s, e, start_parent, end_parent
                 )
                 # Count hits, where the distance is very small
@@ -2068,10 +2068,10 @@ class ChildFractureSet(FractureChildrenGenerator):
         # dist_start will here have dimensions num_children x num_parents
         # closest_pt_start has dimensions num_children x num_parents x dim (2)
         # Dimensions for end-related fields are the same
-        dist_start, closest_pt_start = pp.cg.dist_points_segments(
+        dist_start, closest_pt_start = pp.distances.points_segments(
             start_y, start_parent, end_parent
         )
-        dist_end, closest_pt_end = pp.cg.dist_points_segments(
+        dist_end, closest_pt_end = pp.distances.points_segments(
             end_y, start_parent, end_parent
         )
 
@@ -2133,6 +2133,6 @@ class ChildFractureSet(FractureChildrenGenerator):
         e = self.edges.copy()
 
         # Prolong
-        p = pp.cg.snap_points_to_segments(p, e, threshold)
+        p = pp.constrain_geometry.snap_points_to_segments(p, e, threshold)
 
         return ChildFractureSet(p, e, self.domain, self.parent)

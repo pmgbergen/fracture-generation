@@ -11,7 +11,7 @@ import scipy.sparse.linalg as spla
 
 import porepy as pp
 import pdb
-from examples.papers.flow_upscaling import segment_pixelation
+from fracture_generation import segment_pixelation
 
 
 def permeability_upscaling(
@@ -55,11 +55,11 @@ def permeability_upscaling(
                 }
             }
 
-        assembler = pp.Assembler()
-
+        assembler = pp.Assembler(gb)
+        assembler.discretize()
         # Discretize
         tic = time.time()
-        A, b, block_dof, full_dof = assembler.assemble_matrix_rhs(gb)
+        A, b = assembler.assemble_matrix_rhs()
         if di == 0:
             toc = time.time()
             sim_info["Time_for_assembly"] = toc - tic
@@ -69,7 +69,7 @@ def permeability_upscaling(
             toc = time.time()
             sim_info["Time_for_pressure_solve"] = toc - tic
 
-        assembler.distribute_variable(gb, p, block_dof, full_dof)
+        assembler.distribute_variable(p)
 
         # Post processing to recover flux
         tot_pressure = 0
@@ -79,7 +79,7 @@ def permeability_upscaling(
             inlet = d.get("inlet_faces", None)
             if inlet is None or inlet.size == 0:
                 continue
-            flux = d[pp.DISCRETIZATION_MATRICES][pressure_kw]["flux"] * d["pressure"]
+            flux = d[pp.DISCRETIZATION_MATRICES][pressure_kw]["flux"] * d[pp.STATE]["pressure"]
             flux += (
                 d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_flux"]
                 * d["parameters"][pressure_kw]["bc_values"]
@@ -88,7 +88,7 @@ def permeability_upscaling(
 
             pressure_cell = (
                 d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_pressure_cell"]
-                * d["pressure"]
+                * d[pp.STATE]["pressure"]
             )
             pressure_flux = (
                 d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_pressure_face"]
@@ -230,10 +230,11 @@ def _setup_simulation_flow(gb, data, direction):
         else:
             kxx = np.ones(g.num_cells) * data["fracture_perm"]
 
-        perm = pp.SecondOrderTensor(gb.dim_max(), kxx)
         a = data["aperture"]
         a = np.power(a, gb.dim_max() - g.dim) * np.ones(g.num_cells)
-        specified_parameters = {"aperture": a, "second_order_tensor": perm}
+        perm = pp.SecondOrderTensor(kxx * a)
+
+        specified_parameters = {"second_order_tensor": perm, "aperture": a}
 
         bound_faces = g.tags["domain_boundary_faces"].nonzero()[0]
         if bound_faces.size > 0:
