@@ -61,7 +61,6 @@ def permeability_upscaling(
             d[pp.PRIMARY_VARIABLES] = {"pressure": {"cells": 1}}
             d[pp.DISCRETIZATION] = {"pressure": {"diffusive": mpfa}}
 
-
         coupler = pp.RobinCoupling(pressure_kw, mpfa)
         for e, d in gb.edges():
             g1, g2 = gb.nodes_of_edge(e)
@@ -103,18 +102,22 @@ def permeability_upscaling(
 
             # Compute flux field in the grid
             # Internal flux
-            flux = d[pp.DISCRETIZATION_MATRICES][pressure_kw]["flux"] * d[pp.STATE]["pressure"]
+            flux = (
+                d[pp.DISCRETIZATION_MATRICES][pressure_kw]["flux"]
+                * d[pp.STATE]["pressure"]
+            )
             # Contribution from the boundary
             bound_flux_discr = d[pp.DISCRETIZATION_MATRICES][pressure_kw]["bound_flux"]
-            flux += (
-                bound_flux_discr
-                * d["parameters"][pressure_kw]["bc_values"]
-            )
+            flux += bound_flux_discr * d["parameters"][pressure_kw]["bc_values"]
             # Add contribution from all neighboring lower-dimensional interfaces
             for e, d_e in gb.edges_of_node(g):
                 mg = d_e["mortar_grid"]
-                if mg.dim == g.dim -1:
-                    flux += bound_flux_discr * mg.mortar_to_master_int() * d_e[pp.STATE]["mortar_darcy_flux"]
+                if mg.dim == g.dim - 1:
+                    flux += (
+                        bound_flux_discr
+                        * mg.mortar_to_master_int()
+                        * d_e[pp.STATE]["mortar_darcy_flux"]
+                    )
 
             # Add contribution to total inlet flux
             tot_inlet_flux += np.abs(flux[inlet]).sum()
@@ -160,7 +163,6 @@ def permeability_upscaling(
             temperature_kw = "transport"
             mortar_variable = "lambda_adv"
 
-
             # Identifier of the two terms of the equation
             adv = "advection"
 
@@ -194,8 +196,9 @@ def permeability_upscaling(
                     }
                 }
 
-            pp.fvutils.compute_darcy_flux(gb, keyword_store=temperature_kw ,
-                                          lam_name="mortar_darcy_flux")
+            pp.fvutils.compute_darcy_flux(
+                gb, keyword_store=temperature_kw, lam_name="mortar_darcy_flux"
+            )
 
             A, b, block_dof, full_dof = assembler.assemble_matrix_rhs(
                 gb,
@@ -256,7 +259,6 @@ def permeability_upscaling(
             )
             exporter.write_pvd(time_steps)
 
-
     return upscaled_perm, sim_info
 
 
@@ -303,7 +305,7 @@ def _setup_simulation_flow(gb, data, direction):
             # Use aperture scaling for lower-dimensional faces; for max_dim
             # the aperture is set to 1.
             influx = g.face_areas[bound_faces[hit_in]] * a[0]
-            bc_val[bound_faces[hit_in]] = 1#-influx
+            bc_val[bound_faces[hit_in]] = 1  # -influx
             specified_parameters.update({"bc": bound, "bc_values": bc_val})
 
             # Store the inlet faces
@@ -313,7 +315,7 @@ def _setup_simulation_flow(gb, data, direction):
 
     g_2d = gb.grids_of_dimension(2)[0]
     d_2d = gb.node_props(g_2d)
-    perm = d_2d[pp.PARAMETERS]['flow']['second_order_tensor']
+    perm = d_2d[pp.PARAMETERS]["flow"]["second_order_tensor"]
 
     for e, d in gb.edges():
         gl, _ = gb.nodes_of_edge(e)
@@ -347,7 +349,7 @@ def _setup_simulation_tracer(gb, data, direction):
         else:
             porosity = 0.8 * unity
 
-        specified_parameters = {"mass_weight": porosity,}
+        specified_parameters = {"mass_weight": porosity}
 
         bound_faces = g.tags["domain_boundary_faces"].nonzero()[0]
         if bound_faces.size > 0:
@@ -626,7 +628,7 @@ def analyze_intersections_of_sets(set_1, set_2=None, tol=1e-4):
 
     num_fracs = edges.shape[1]
 
-    _, e_split = pp.cg.remove_edge_crossings2(pts, edges, tol=tol)
+    _, e_split = pp.intersections.split_intersecting_segments_2d(pts, edges, tol=tol)
 
     # Find which of the split edges belong to family_1 and 2
     family_1 = np.isin(e_split[2], np.arange(num_fracs_1))
