@@ -375,7 +375,6 @@ class StochasticFractureGenerator(object):
     def set_intensity_map(self, box):
         self.intensity = box
 
-
     def domain_measure(self, domain=None):
         """ Get the measure (length, area) of a given box domain, specified by its
         extensions stored in a dictionary.
@@ -742,6 +741,7 @@ class ConstrainedChildrenGenerator(StochasticFractureGenerator):
         parent (StochasticFractureNetwork2d): Parent network.
 
     """
+
     def __init__(self, parent, side_distribution=None, **kwargs):
         """ Initialize the generator.
 
@@ -839,6 +839,7 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
         parent (StochasticFractureNetwork2d): Parent network.
 
     """
+
     def __init__(self, parent, side_distribution=None, data=None, **kwargs):
         super(DoublyConstrainedChildrenGenerator, self).__init__(**kwargs)
 
@@ -919,7 +920,6 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
         r = np.random.rand(1)
         return np.nonzero(r < cum_length)[0][0]
 
-
     def _pairs_of_parents(self, pair_array, point_first, point_second):
         """ Convert the pairs and intersection points into a format to be used
         in the generation.
@@ -939,18 +939,18 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
         # generation with this will function, so raise a warning.
         if len(pair_array) == 0:
             raise ValueError("Found no neighboring parents. Cannot generate children.")
-            #self.parent_pairs = pairs
-            #self.interval_first = interval_first
-            #self.interval_second = interval_second
-            #return
-            
+            # self.parent_pairs = pairs
+            # self.interval_first = interval_first
+            # self.interval_second = interval_second
+            # return
+
         def dist_pts(a, b):
             if a.shape[0] < 2:
                 a = a.reshape((-1, 1))
             if b.shape[0] < 2:
                 b = b.reshape((-1, 1))
-                
-            return np.sqrt(np.sum((a - b)**2))
+
+            return np.sqrt(np.sum((a - b) ** 2))
 
         # Loop over all fractures
         for fi in range(self.parent.num_frac):
@@ -1000,7 +1000,9 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
                     # on the second closest (if there is one)
                     pself = pt_self[:, ni].reshape((-1, 1))
                     pf = pt_first[:, ni].reshape((-1, 1))
-                    if loc_second_neigh is not None:  # None signifies there are no neighbors here
+                    if (
+                        loc_second_neigh is not None
+                    ):  # None signifies there are no neighbors here
                         # A bit of back and forth, depending on how many points there are
                         try:
                             psec = pt_second[:, ni].reshape((-1, 1))
@@ -1020,7 +1022,7 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
                             pos_pt_other = pf
                             # Register the new active pair
                             active_pos_pair = (fi, loc_neigh)
-                            
+
                         else:
                             # Check if the point on the first fracture is indeed an endpoint,
                             # or if the reason we shoot from pself is that we were hit
@@ -1028,7 +1030,7 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
                             p0, p1 = self.parent.get_points(loc_neigh)
                             if dist_pts(p0, pf) > tol and dist_pts(p1, pf) > tol:
                                 continue
-                            
+
                             # We found (this fracture was hit by) the end of a neighbor.
                             # The next neighbor is the second closest to the hit point in
                             # the direction of vec
@@ -1109,14 +1111,14 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
                             # from the other side
                             p0, p1 = self.parent.get_points(loc_neigh)
                             if dist_pts(p0, pf) > tol and dist_pts(p1, pf) > tol:
-                                continue                            
-                            
+                                continue
+
                             # We found (this fracture was hit by) the end of a neighbor.
                             # The next neighbor is the second closest to the hit point in
                             # the direction of vec.
-                            
+
                             # Add the interval to the pairing of the main and first fracture
-                            # The pairing is either non-empty (another interval has been 
+                            # The pairing is either non-empty (another interval has been
                             # found before), or we need to make a new dictionary item
                             if active_neg_pair in interval_first.keys():
                                 tmp = interval_first[active_neg_pair]
@@ -1192,7 +1194,7 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
         for k, v in interval_first.items():
             for p in v:
                 # Length of interval
-                l = np.sqrt(np.sum((p[:, 1] - p[:, 0])**2))
+                l = np.sqrt(np.sum((p[:, 1] - p[:, 0]) ** 2))
                 lengths.append(l)
                 # Points
                 points.append(p)
@@ -1325,7 +1327,7 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
         # Create a vector with the right direction, and length equal to the maximum
         # size of the domain.
         _, _, dx, dy = self._decompose_domain()
-        length = dx**2 + dy**2
+        length = dx ** 2 + dy ** 2
 
         angle = self._generate_from_distribution(1000, self.dist_orientation).mean()
         vec = np.vstack((np.cos(angle), np.sin(angle))) * length
@@ -1461,9 +1463,17 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
                 return b.reshape((-1, 1))
             else:
                 return b
+
         # Data conversion
         isect_self = arr_to_np(isect_self)
         isect_first = arr_to_np(isect_first)
         isect_second = arr_to_np(isect_second)
 
-        return first_neighbor, second_neighbor, isect_self, isect_first, isect_second, is_pos
+        return (
+            first_neighbor,
+            second_neighbor,
+            isect_self,
+            isect_first,
+            isect_second,
+            is_pos,
+        )

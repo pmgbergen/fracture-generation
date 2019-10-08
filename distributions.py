@@ -19,6 +19,7 @@ class Signum:
         tmp[vals < self.fraction_negative] = -1
         return tmp
 
+
 class Uniform:
     def __init__(self, value=0):
         self.value = value
