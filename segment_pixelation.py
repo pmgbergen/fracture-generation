@@ -11,15 +11,15 @@ import numpy as np
 
 
 class Bresenham(object):
-    """ https://gist.github.com/flags/1132363
+    """ Copied from https://gist.github.com/flags/1132363.
     """
+
     def __init__(self, start, end):
         self.start = list(start)
         self.end = list(end)
         self.path = []
 
-        self.steep = abs(self.end[1] - self.start[1]) > abs(
-            self.end[0] - self.start[0])
+        self.steep = abs(self.end[1] - self.start[1]) > abs(self.end[0] - self.start[0])
 
         if self.steep:
             self.start = self.swap(self.start[0], self.start[1])
@@ -64,8 +64,9 @@ class Bresenham(object):
     def swap(self, n1, n2):
         return [n2, n1]
 
+
 def points_to_cartind(p, dx):
-    return (np.round((p - 0.5 * dx) / dx)).astype('int')
+    return (np.round((p - 0.5 * dx) / dx)).astype(np.int)
 
 
 def pixelate(pts, segments, nx, dx, segment_tags=None):
@@ -74,15 +75,21 @@ def pixelate(pts, segments, nx, dx, segment_tags=None):
     pts = pts.T
 
     cart_ind = points_to_cartind(pts, dx)
+    # Points on the boundary of the domain will get Cartesian index nx+1. Reduce this by 1
+    for row in range(pts.shape[1]):
+        over = np.where(cart_ind[:, row] >= nx[row])
+        cart_ind[over, row] = nx[row] - 1
+
     num_segments = segments.shape[0]
     if segment_tags is None:
         segment_tags = np.ones(num_segments)
-    interpolated_data = np.zeros(nx, dtype='int')
+    interpolated_data = np.zeros(nx, dtype="int")
     for iter1 in range(num_segments):
         p0 = segments[iter1, 0]
         p1 = segments[iter1, 1]
-        l = Bresenham([cart_ind[p0, 0], cart_ind[p0, 1]],
-                      [cart_ind[p1, 0], cart_ind[p1, 1]])
+        l = Bresenham(
+            [cart_ind[p0, 0], cart_ind[p0, 1]], [cart_ind[p1, 0], cart_ind[p1, 1]]
+        )
         inds = np.array(l.path)
         interpolated_data[inds[:, 0], inds[:, 1]] = segment_tags[iter1]
 
