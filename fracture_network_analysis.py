@@ -669,10 +669,10 @@ def analyze_intersections_of_sets(set_1, set_2=None, tol=1e-4):
 
     i_n, l_n, y_n_c, y_n_f, x_n = count_node_types_between_families(e_split)
 
-    num_i_nodes = np.zeros(num_fracs)
-    num_y_nodes = np.zeros(num_fracs)
-    num_x_nodes = np.zeros(num_fracs)
-    num_arrests = np.zeros(num_fracs)
+    num_i_nodes = np.zeros(num_fracs, dtype=np.int)
+    num_y_nodes = np.zeros(num_fracs, dtype=np.int)
+    num_x_nodes = np.zeros(num_fracs, dtype=np.int)
+    num_arrests = np.zeros(num_fracs, dtype=np.int)
 
     for fi in range(num_fracs):
         if set_2 is None:
