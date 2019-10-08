@@ -880,14 +880,6 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
         fi = self.pairs[0, pi]
         si = self.pairs[1, pi]
 
-        # If the generated fracture will be longer than the minimal of the
-        # main parent, we return a void
-        # TODO: Is this really a good decision?
-        dist, *rest = pp.distances.two_segments(*self.parent.get_points(fi),
-                                              *self.parent.get_points(si))
-        if dist > np.min(self.parent.length()[[fi, si]]):
-            return np.zeros((2, 0))
-
         # Assign equal probability that the points are on each side of the parent
         side = self._generate_from_distribution(1, self.dist_side)
 
@@ -941,6 +933,8 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
         interval_first = {}
         interval_second = {}
 
+        tol = 1e-4
+
         # Special case of no neighboring fractures. It is not really clear how
         # generation with this will function, so raise a warning.
         if len(pair_array) == 0:
@@ -949,6 +943,14 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
             #self.interval_first = interval_first
             #self.interval_second = interval_second
             #return
+            
+        def dist_pts(a, b):
+            if a.shape[0] < 2:
+                a = a.reshape((-1, 1))
+            if b.shape[0] < 2:
+                b = b.reshape((-1, 1))
+                
+            return np.sqrt(np.sum((a - b)**2))
 
         # Loop over all fractures
         for fi in range(self.parent.num_frac):
@@ -1018,8 +1020,15 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
                             pos_pt_other = pf
                             # Register the new active pair
                             active_pos_pair = (fi, loc_neigh)
-
+                            
                         else:
+                            # Check if the point on the first fracture is indeed an endpoint,
+                            # or if the reason we shoot from pself is that we were hit
+                            # from the other side
+                            p0, p1 = self.parent.get_points(loc_neigh)
+                            if dist_pts(p0, pf) > tol and dist_pts(p1, pf) > tol:
+                                continue
+                            
                             # We found (this fracture was hit by) the end of a neighbor.
                             # The next neighbor is the second closest to the hit point in
                             # the direction of vec
@@ -1079,7 +1088,7 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
                                 active_pos_pair = (fi, active_neigh_pos)
 
                     else:
-                        # This is the other side of the fracture; the algorithm is
+                        # This is the negative side of the fracture; the algorithm is
                         # identical to the one commented above.
                         # Implementation note: It should be possible to unify the
                         # positive and negative sides instead of copying code, but
@@ -1095,9 +1104,20 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
                             active_neg_pair = (fi, loc_neigh)
 
                         else:
+                            # Check if the point on the first fracture is indeed an endpoint,
+                            # or if the reason we shoot from pself is that we were hit
+                            # from the other side
+                            p0, p1 = self.parent.get_points(loc_neigh)
+                            if dist_pts(p0, pf) > tol and dist_pts(p1, pf) > tol:
+                                continue                            
+                            
                             # We found (this fracture was hit by) the end of a neighbor.
                             # The next neighbor is the second closest to the hit point in
-                            # the direction of vec
+                            # the direction of vec.
+                            
+                            # Add the interval to the pairing of the main and first fracture
+                            # The pairing is either non-empty (another interval has been 
+                            # found before), or we need to make a new dictionary item
                             if active_neg_pair in interval_first.keys():
                                 tmp = interval_first[active_neg_pair]
                                 tmp.append(np.hstack((neg_pt_self, pself)))
@@ -1107,8 +1127,11 @@ class DoublyConstrainedChildrenGenerator(StochasticFractureGenerator):
                                     np.hstack((neg_pt_self, pself))
                                 ]
 
-                            # pdb.set_trace()
+                            # If the nearest neighbor is the one that shot the ray we were
+                            # hit by, the current interval is ending
                             if active_neigh_neg == loc_neigh:
+                                # The next active neighbor is the second one. This may be
+                                # None, which signifies that no neighbor exists
                                 active_neigh_neg = loc_second_neigh
                                 if active_neg_pair in interval_second.keys():
                                     tmp = interval_second[active_neg_pair]
