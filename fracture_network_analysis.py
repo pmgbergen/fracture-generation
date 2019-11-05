@@ -8,6 +8,7 @@ import numpy as np
 import networkx as nx
 import time
 import scipy.sparse.linalg as spla
+import uuid
 
 import porepy as pp
 import pdb
@@ -44,8 +45,8 @@ def permeability_upscaling(
     for di, direct in enumerate(directions):
 
         tic = time.time()
-
-        gb = network.mesh(tol=network.tol, mesh_args=mesh_args)
+        filename = str(uuid.uuid4())
+        gb = network.mesh(tol=network.tol, mesh_args=mesh_args, file_name=filename)
 
         toc = time.time()
         if di == 0:
